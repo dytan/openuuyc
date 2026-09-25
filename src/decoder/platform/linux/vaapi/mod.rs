@@ -1,9 +1,11 @@
 //! VA-API hardware decode for Linux.
 //!
-//! Only the codecs this client negotiates are wired up: H.264 today, with the
-//! session enum kept so HEVC slots in beside it.
+//! H.264 and HEVC (Main, 8-bit 4:2:0) when the driver exposes VLD for the
+//! matching profile. Surfaces are copied back as NV12; 10-bit / 4:4:4 are not
+//! advertised because this backend cannot read them back yet.
 mod avc;
 mod display;
+mod hevc;
 mod output;
 
 use cros_libva::VAProfile;
@@ -22,6 +24,7 @@ pub(super) struct Session {
 
 enum Codec {
     H264(Box<avc::Avc>),
+    Hevc(Box<hevc::Hevc>),
 }
 
 impl Session {
@@ -48,6 +51,15 @@ impl Session {
                     extra: Some(config.extra_data.clone()),
                 })
             }
+            CodecKind::Hevc => {
+                if !probe(CodecKind::Hevc, config.width, config.height, 8, 1) {
+                    return Err(DecodeError::Unsupported);
+                }
+                Ok(Self {
+                    codec: Codec::Hevc(Box::new(hevc::Hevc::new())),
+                    extra: Some(config.extra_data.clone()),
+                })
+            }
             _ => Err(DecodeError::Unsupported),
         }
     }
@@ -68,12 +80,14 @@ impl Session {
         };
         match &mut self.codec {
             Codec::H264(session) => session.decode(data, cancel),
+            Codec::Hevc(session) => session.decode(data, cancel),
         }
     }
 
     pub(super) fn reset(&mut self) {
         match &mut self.codec {
             Codec::H264(session) => session.reset(),
+            Codec::Hevc(session) => session.reset(),
         }
     }
 }
@@ -90,6 +104,7 @@ pub(super) fn probe(codec: CodecKind, width: u32, height: u32, depth: u8, chroma
             VAProfile::VAProfileH264Main,
             VAProfile::VAProfileH264ConstrainedBaseline,
         ],
+        CodecKind::Hevc => &[VAProfile::VAProfileHEVCMain],
         _ => return false,
     };
     profiles

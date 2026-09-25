@@ -29,7 +29,7 @@ Native Linux GUI controller built on egui + winit. Highlights that exist on this
 | Area | Status |
 |------|--------|
 | GUI shell | **wgpu** present (Vulkan / GLES) |
-| Video decode | **VA-API H.264** when the driver accepts the stream; **Rust H.264 software** fallback. H.265 / HEVC is not fully wired — if the host offers an undecodable H.265 stream, capability negotiation falls back toward H.264 where possible |
+| Video decode | **VA-API H.264** and **VA-API H.265/HEVC Main** (8-bit 4:2:0 NV12) when the driver exposes VLD; **Rust H.264 software** fallback. Main10 / 4:4:4 are not advertised (no NV12-compatible readback yet). If HEVC VA-API is unavailable, capability negotiation falls back toward H.264 |
 | Fonts / UI | Noto Sans CJK SC (TTC face index 2) and related candidates |
 | Connect options | `gui` flags for codec, hardware decode, transport, auto mouse control, clipboard files |
 | Clipboard | **arboard** text/image + **FUSE** file offer (`clipboard_files`) |

@@ -9,7 +9,7 @@ not a fork product. Windows cfg paths stay intact.
 | Area | Status |
 |------|--------|
 | GUI shell | **wgpu** presenter (Vulkan/GLES) with egui; glow path retired on this branch |
-| Video decode | **VA-API** when the driver accepts the stream; **Rust H.264 software** fallback |
+| Video decode | **VA-API H.264 + HEVC Main** (8-bit 4:2:0) when the driver exposes VLD; **Rust H.264 software** fallback. Main10 not advertised (NV12 readback only) |
 | Video present | wgpu upload (RGBA or NV12 shader path); VA-API still readbacks to CPU NV12 (no dmabuf zero-copy yet) |
 | Login / devices | QR + GUI login; Secret Service / gnome-keyring (or compatible) |
 | 连接设置 | Codec / HW-decode / transport / **键鼠控制** (`auto_mouse_control`, default on) |
@@ -21,7 +21,7 @@ not a fork product. Windows cfg paths stay intact.
 ## Deferred / remaining
 
 - **dmabuf zero-copy** from VA-API into wgpu (today: surface → packed NV12 → GPU upload)
-- HEVC VA-API (H.264 HW path is what is wired)
+- dmabuf zero-copy / Main10 readback (HEVC Main VA-API is wired; see README)
 - Broader Wayland compositor quirks soak
 - Plugin host parity with Windows
 

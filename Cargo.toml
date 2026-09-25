@@ -105,6 +105,7 @@ windows = { version = "0.62.2", default-features = false, features = [
 [target.'cfg(target_os = "linux")'.dependencies]
 openuuyc-h264 = { path = "src/decoder/h264-core" }
 oxideav-h264 = { version = "=0.1.8" }
+oxideav-h265 = { version = "=0.0.10" }
 cros-libva = { path = "vendor/cros-libva" }
 egui-wgpu = { version = "0.36.1", default-features = false }
 wgpu = { version = "30.0", default-features = false, features = ["vulkan", "gles", "wgsl"] }

@@ -828,7 +828,7 @@ struct Readback {
 ///
 /// A failure before the sync point consumes the surface with the picture, so
 /// the caller must drop the whole pool rather than return the surface to it.
-fn submit(
+pub(super) fn submit(
     context: &std::rc::Rc<cros_libva::Context>,
     surface: Surface,
     buffers: Vec<BufferType>,
