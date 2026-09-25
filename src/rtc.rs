@@ -565,24 +565,64 @@ async fn send_remote_input(
                     let state=mouse.clone();let guarded=event.clone();
                     let release=matches!(event.event,crate::remote_input::InputEvent::Button{down:false,..}|crate::remote_input::InputEvent::Key{down:false,..}|crate::remote_input::InputEvent::AssistButton{down:false,..});
                     let payload = event.event.encode();
-                    // Match origin/Windows: HID JSON is a *binary* DataChannel /
-                    // mixed-KCP BINARY message. OPENUUYC_HID_AS_TEXT=1 forces the
-                    // prior text experiment on both paths.
+                    // Primary path matches origin/Windows: mixed-KCP BINARY (or
+                    // SCTP binary when KCP is off). OPENUUYC_HID_AS_TEXT=1 still
+                    // forces TEXT on the primary path for soak A/B.
+                    //
+                    // Dual-send soak: ALWAYS also push the same JSON as an SCTP
+                    // string on CONTROL. Framing-only soaks (TEXT vs BINARY vs
+                    // pure SCTP) all submitted OK but the Windows host ignored
+                    // HID; this checks whether the host only honors SCTP text
+                    // while protobuf continues on KCP, without dropping the
+                    // origin primary path.
                     let as_text = std::env::var_os("OPENUUYC_HID_AS_TEXT")
                         .is_some_and(|v| v != "0" && !v.is_empty());
-                    if kcp.is_negotiated() {
+                    let primary = if kcp.is_negotiated() {
+                        // send_input honors OPENUUYC_HID_AS_TEXT for KCP PPI.
                         kcp.send_input(
                             channel.id(),
-                            payload,
+                            payload.clone(),
                             Arc::new(move || state.is_current(&guarded)),
                             release,
                         )
                         .await
                     } else if as_text {
-                        send_control_text(&channel, payload).await
+                        send_control_text(&channel, payload.clone()).await
                     } else {
-                        send_control_message(&kcp, &channel, payload).await
+                        send_control_message(&kcp, &channel, payload.clone()).await
+                    };
+                    let dual = send_control_text(&channel, payload).await;
+                    match &dual {
+                        Ok(bytes) => tracing::debug!(
+                            target: "openuuyc::rtc::input",
+                            bytes,
+                            kcp = kcp.is_negotiated(),
+                            "HID dual-send SCTP CONTROL text ok"
+                        ),
+                        Err(error) => tracing::warn!(
+                            target: "openuuyc::rtc::input",
+                            %error,
+                            kcp = kcp.is_negotiated(),
+                            "HID dual-send SCTP CONTROL text failed"
+                        ),
                     }
+                    match &primary {
+                        Ok(bytes) => tracing::debug!(
+                            target: "openuuyc::rtc::input",
+                            bytes,
+                            kcp = kcp.is_negotiated(),
+                            as_text,
+                            "HID primary CONTROL send ok"
+                        ),
+                        Err(error) => tracing::warn!(
+                            target: "openuuyc::rtc::input",
+                            %error,
+                            kcp = kcp.is_negotiated(),
+                            as_text,
+                            "HID primary CONTROL send failed"
+                        ),
+                    }
+                    primary
                 }) => result
                 .map_err(|_| anyhow::anyhow!("鼠标输入发送超时"))
                 .and_then(|result| result.map(|_| ())),
@@ -621,6 +661,7 @@ async fn send_remote_input(
                     kind,
                     %payload,
                     kcp = kcp.is_negotiated(),
+                    dual_sctp_text = true,
                     "input submitted to CONTROL"
                 );
             } else {
