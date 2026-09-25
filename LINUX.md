@@ -7,51 +7,85 @@ Local milestone on native Linux (`x86_64-unknown-linux-gnu`). Identity remains *
 Verified on this tree with Rust **1.98+** (edition 2024 crates such as `egui` 0.36 / `mediaway-common` need a recent rustc; 1.85 is too old):
 
 ```bash
+# toolchain: rustup (1.98+)
+source "$HOME/.cargo/env"   # if needed
 cargo check
 cargo build
+
 ./target/debug/OpenUUYC native-status
 ./target/debug/OpenUUYC contracts
 ./target/debug/OpenUUYC rtc-selftest
 ./target/debug/OpenUUYC auth-status
+
+# GUI control center (egui-winit + egui_glow / EGL)
+# Needs a working DISPLAY (or Wayland) and runtime libs below.
+./target/debug/OpenUUYC gui
 ```
+
+Smoke-tested: `OpenUUYC gui` opens a decorated window titled **「OpenUUYC · 控制中心」** and keeps the event loop alive (device list / login may still be incomplete depending on auth state).
 
 CLI paths that do not need a GUI shell compile and run: transport/status, REST contract listing, local WebRTC offer self-test, auth/keyring status, login/logout scaffolding (needs network + keyring backend at runtime).
 
 App data lives under `$XDG_DATA_HOME/openuuyc` or `~/.local/share/openuuyc` (see `src/paths.rs`).
 
-## Intentionally stubbed / incomplete
+### Runtime packages (Debian/Ubuntu-ish)
+
+```bash
+sudo apt-get install -y \
+  libegl1 libegl-dev \
+  libxkbcommon0 libxkbcommon-x11-0 \
+  libxcb-xkb1 \
+  libwayland-client0
+```
+
+Missing `libxkbcommon-x11.so` causes an immediate panic from `xkbcommon-dl` when opening the GUI on X11.
+
+## Graphical path (this milestone)
+
+| Piece | Location | Notes |
+|-------|----------|--------|
+| Main UI event loop | `src/ui/linux.rs` | glutin-winit EGL + `egui_glow::Painter`; mirrors Windows `AppFactory` / `WindowConfig` / `window_manager` requests (`Open`, `Viewer`, Focus, Repaint) |
+| Viewer / connecting | `src/viewer/linux/windows_presenter.rs` | Connecting progress UI + playing shell; pulls `RenderSurface::CpuRgba8` from the session frame queue into an egui texture |
+| Input | same presenter | Absolute mouse + buttons/wheel + keyboard via existing `RemoteInput` / `stream_control` shapes (no Win32 hooks) |
+| Decode | software H.264 | Already on Linux via `openuuyc-h264`; presenter does not use D3D11 surfaces |
+| Windows | unchanged | Still `cfg(windows)` for D3D11 / Win32 UI |
+
+Deps (Linux target): `egui_glow` (winit), `glow` 0.17, `glutin` / `glutin-winit` (egl, x11, wayland), `egui-winit`, `raw-window-handle`.
+
+## Status by area
 
 | Area | Status |
 |------|--------|
-| GUI device center / viewer | `src/ui/linux.rs` returns TODO; no egui-winit+glow/wgpu shell yet |
-| Video present (D3D11 path) | Windows-only; Linux stub presenter |
-| Hardware decode | Windows DXVA11 only; Linux uses Rust H.264 software (`openuuyc-h264`) |
+| GUI device center | **Opens**; login/device refresh still depend on auth + network |
+| Viewer connecting / play window | Wired; needs live connect soak to validate end-to-end |
+| CPU RGBA / software H.264 present | Presenter path implemented; not soak-tested on a real session yet |
+| Hardware decode | Windows DXVA only; Linux software for now |
 | H.265 software | Not wired on Linux yet |
-| Input capture (global hooks) | Windows hooks stubbed |
+| Global input hooks | Windows hooks stubbed; in-window winit input is used for remote control |
 | Clipboard native sync | OLE path stubbed; protocol retained |
 | Plugins / DLL host | `src/plugins_linux.rs` stub |
 | File-transfer Win32 bits | Portable FS path; places use XDG/home |
 | NetEq | Built with `WEBRTC_POSIX` + `WEBRTC_LINUX` |
 
-## Remaining blockers for a usable connect session (severity)
+## Remaining blockers for connect soak
 
-1. **Critical — Viewer / windowing:** egui + winit + OpenGL/Vulkan presenter to show decoded frames and host the device center (`ui::run`, `viewer` presenter).
-2. **Critical — Input:** keyboard/mouse capture and remote injection path without Win32 hooks (`viewer` input modules).
-3. **High — Video decode display path:** software H.264 → CPU RGBA (or VA-API later) into the Linux presenter; H.265 strategy undecided.
-4. **High — Signaling + connect orchestration:** mostly portable already (`signal`, `rtc`, `controller`); blocked on viewer lifecycle / progress UI.
-5. **Medium — Login UX:** CLI login should work with keyring; GUI QR/SMS still needs UI shell.
-6. **Medium — Audio:** `cpal` + NetEq likely close; needs end-to-end session soak on Linux hosts.
-7. **Lower — Clipboard / plugins / file transfer polish:** stubs or partial ports.
+1. **Auth / device list in GUI** — complete login (keyring + network) so the control center can list and start a connect.
+2. **End-to-end connect** — exercise `Request::Viewer` → connecting progress → soft-decode frames → `CpuRgba8` texture; confirm no GL/context sharing issues across multi-window.
+3. **Input soak** — absolute mouse + keyboard under real remote session; relative mouse / modifier edge cases; IME.
+4. **Audio** — `cpal` + NetEq on Linux hosts (mute first for video-only soak).
+5. **H.265 / hardware decode** — strategy (software vs VA-API) undecided.
+6. **Clipboard / plugins / file transfer polish** — stubs or partial ports.
 
 ## Suggested next milestone
 
-1. Implement `src/ui/linux.rs` with **egui-winit + egui_glow** (deps already sketched in `Cargo.toml`) enough to run the existing device-center `App` and a connecting/progress window.
-2. Present software-decoded **CPU RGBA** frames in that shell (skip zero-copy GPU initially).
-3. Wire **winit** keyboard/mouse events into the existing remote-input protocol (no global hooks required for first connect).
-4. Soak-test: `login` → `devices` → `connect` with muted audio, H.264 software, auto transport.
+1. GUI login → device list refresh with a real account.
+2. Connect soak: muted audio, H.264 software, auto transport; confirm frames + input.
+3. Harden multi-window GL (shared glow contexts / make_current) and document Wayland vs X11 quirks.
+4. Optional: VA-API or better software H.265 path.
 
 ## Build notes
 
 - `build.rs` allows `windows` and `linux`; embeds Windows resources only on Windows; NetEq uses POSIX/Linux defines on Linux (C++ exceptions enabled for `bad_alloc`).
 - Do not strip `LICENSE` / `THIRD_PARTY_NOTICES`.
 - Upstream contribution should stay under OpenUUYC naming.
+- Do not push unless asked; keep Windows `cfg` paths intact.
