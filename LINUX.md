@@ -21,7 +21,7 @@ not a fork product. Windows cfg paths stay intact.
 ## Deferred / remaining
 
 - **dmabuf zero-copy** from VA-API into wgpu (today: surface → packed NV12 → GPU upload)
-- dmabuf zero-copy / Main10 readback (HEVC Main VA-API is wired; see README)
+- **HEVC Main10 / 4:4:4** readback (Main 8-bit NV12 is wired; Main10 needs a non-NV12 path)
 - Broader Wayland compositor quirks soak
 - Plugin host parity with Windows
 
