@@ -158,3 +158,7 @@ Prep for a real UU account on a Linux desktop (this CI/box run cannot supply cre
 - `build.rs` allows `windows` and `linux`; NetEq uses POSIX/Linux defines on Linux.
 - Do not strip `LICENSE` / `THIRD_PARTY_NOTICES`.
 - Do not push unless asked; keep Windows `cfg` paths intact.
+
+## Continue on another machine
+
+Step-by-step handoff (transfer unpushed commits, packages, soak): [`CONTINUE-ON-LINUX-BOX.md`](CONTINUE-ON-LINUX-BOX.md). Bundle/patches under `handoff/`.

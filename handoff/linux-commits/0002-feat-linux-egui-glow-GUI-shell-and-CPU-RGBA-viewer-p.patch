@@ -1,0 +1,1717 @@
+From 8c04fefe10bb409484d7e92b04c34083aa8d74d3 Mon Sep 17 00:00:00 2001
+From: OpenUUYC Linux WIP <linux-port@local>
+Date: Fri, 25 Sep 2026 09:26:07 +0800
+Subject: [PATCH 2/3] feat(linux): egui-glow GUI shell and CPU RGBA viewer path
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Replace the Linux UI stub with egui-winit + egui_glow (EGL via glutin)
+matching AppFactory/WindowConfig patterns, and wire the Linux viewer
+presenter to show soft-decoded CpuRgba8 frames plus winit→RemoteInput
+mapping. Document how to run OpenUUYC gui and remaining connect-soak
+blockers. Windows cfg paths unchanged; no push.
+---
+ Cargo.lock                            |  18 +-
+ Cargo.toml                            |   4 +-
+ LINUX.md                              |  68 ++-
+ src/ui/linux.rs                       | 718 ++++++++++++++++++++++-
+ src/viewer/linux/windows_presenter.rs | 784 +++++++++++++++++++++++++-
+ 5 files changed, 1538 insertions(+), 54 deletions(-)
+
+diff --git a/Cargo.lock b/Cargo.lock
+index 1cecc77..5318a20 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -1389,9 +1389,11 @@ checksum = "69b65e45f8d8d7c6d848b3ec41f642b54ad828033f1511d4b4c9adc09040166a"
+ dependencies = [
+  "bytemuck",
+  "egui",
+- "glow 0.17.0",
++ "egui-winit",
++ "glow",
+  "log",
+  "profiling",
++ "winit",
+ ]
+ 
+ [[package]]
+@@ -1876,18 +1878,6 @@ dependencies = [
+  "vello_common",
+ ]
+ 
+-[[package]]
+-name = "glow"
+-version = "0.16.0"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "c5e5ea60d70410161c8bf5da3fdfeaa1c72ed2c15f8bbb9d19fe3a4fad085f08"
+-dependencies = [
+- "js-sys",
+- "slotmap",
+- "wasm-bindgen",
+- "web-sys",
+-]
+-
+ [[package]]
+ name = "glow"
+ version = "0.17.0"
+@@ -3359,7 +3349,7 @@ dependencies = [
+  "embed-resource",
+  "flate2",
+  "futures-util",
+- "glow 0.16.0",
++ "glow",
+  "glutin",
+  "glutin-winit",
+  "hmac",
+diff --git a/Cargo.toml b/Cargo.toml
+index 1d134f4..fc51f5b 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -108,8 +108,8 @@ openuuyc-h264 = { path = "src/decoder/h264-core" }
+ oxideav-h264 = { version = "=0.1.8" }
+ # Thin egui + winit shell for Linux controller UI (no D3D11).
+ egui-winit = { version = "0.36.1", default-features = false, features = ["clipboard", "links", "wayland", "x11"] }
+-egui_glow = { version = "0.36.1", default-features = false }
+-glow = "0.16"
++egui_glow = { version = "0.36.1", default-features = false, features = ["winit"] }
++glow = "0.17"
+ glutin = { version = "0.32", default-features = false, features = ["egl", "x11", "wayland"] }
+ glutin-winit = { version = "0.5", default-features = false, features = ["egl", "x11", "wayland"] }
+ raw-window-handle = "0.6"
+diff --git a/LINUX.md b/LINUX.md
+index 792cde4..15bc73c 100644
+--- a/LINUX.md
++++ b/LINUX.md
+@@ -7,51 +7,85 @@ Local milestone on native Linux (`x86_64-unknown-linux-gnu`). Identity remains *
+ Verified on this tree with Rust **1.98+** (edition 2024 crates such as `egui` 0.36 / `mediaway-common` need a recent rustc; 1.85 is too old):
+ 
+ ```bash
++# toolchain: rustup (1.98+)
++source "$HOME/.cargo/env"   # if needed
+ cargo check
+ cargo build
++
+ ./target/debug/OpenUUYC native-status
+ ./target/debug/OpenUUYC contracts
+ ./target/debug/OpenUUYC rtc-selftest
+ ./target/debug/OpenUUYC auth-status
++
++# GUI control center (egui-winit + egui_glow / EGL)
++# Needs a working DISPLAY (or Wayland) and runtime libs below.
++./target/debug/OpenUUYC gui
+ ```
+ 
++Smoke-tested: `OpenUUYC gui` opens a decorated window titled **「OpenUUYC · 控制中心」** and keeps the event loop alive (device list / login may still be incomplete depending on auth state).
++
+ CLI paths that do not need a GUI shell compile and run: transport/status, REST contract listing, local WebRTC offer self-test, auth/keyring status, login/logout scaffolding (needs network + keyring backend at runtime).
+ 
+ App data lives under `$XDG_DATA_HOME/openuuyc` or `~/.local/share/openuuyc` (see `src/paths.rs`).
+ 
+-## Intentionally stubbed / incomplete
++### Runtime packages (Debian/Ubuntu-ish)
++
++```bash
++sudo apt-get install -y \
++  libegl1 libegl-dev \
++  libxkbcommon0 libxkbcommon-x11-0 \
++  libxcb-xkb1 \
++  libwayland-client0
++```
++
++Missing `libxkbcommon-x11.so` causes an immediate panic from `xkbcommon-dl` when opening the GUI on X11.
++
++## Graphical path (this milestone)
++
++| Piece | Location | Notes |
++|-------|----------|--------|
++| Main UI event loop | `src/ui/linux.rs` | glutin-winit EGL + `egui_glow::Painter`; mirrors Windows `AppFactory` / `WindowConfig` / `window_manager` requests (`Open`, `Viewer`, Focus, Repaint) |
++| Viewer / connecting | `src/viewer/linux/windows_presenter.rs` | Connecting progress UI + playing shell; pulls `RenderSurface::CpuRgba8` from the session frame queue into an egui texture |
++| Input | same presenter | Absolute mouse + buttons/wheel + keyboard via existing `RemoteInput` / `stream_control` shapes (no Win32 hooks) |
++| Decode | software H.264 | Already on Linux via `openuuyc-h264`; presenter does not use D3D11 surfaces |
++| Windows | unchanged | Still `cfg(windows)` for D3D11 / Win32 UI |
++
++Deps (Linux target): `egui_glow` (winit), `glow` 0.17, `glutin` / `glutin-winit` (egl, x11, wayland), `egui-winit`, `raw-window-handle`.
++
++## Status by area
+ 
+ | Area | Status |
+ |------|--------|
+-| GUI device center / viewer | `src/ui/linux.rs` returns TODO; no egui-winit+glow/wgpu shell yet |
+-| Video present (D3D11 path) | Windows-only; Linux stub presenter |
+-| Hardware decode | Windows DXVA11 only; Linux uses Rust H.264 software (`openuuyc-h264`) |
++| GUI device center | **Opens**; login/device refresh still depend on auth + network |
++| Viewer connecting / play window | Wired; needs live connect soak to validate end-to-end |
++| CPU RGBA / software H.264 present | Presenter path implemented; not soak-tested on a real session yet |
++| Hardware decode | Windows DXVA only; Linux software for now |
+ | H.265 software | Not wired on Linux yet |
+-| Input capture (global hooks) | Windows hooks stubbed |
++| Global input hooks | Windows hooks stubbed; in-window winit input is used for remote control |
+ | Clipboard native sync | OLE path stubbed; protocol retained |
+ | Plugins / DLL host | `src/plugins_linux.rs` stub |
+ | File-transfer Win32 bits | Portable FS path; places use XDG/home |
+ | NetEq | Built with `WEBRTC_POSIX` + `WEBRTC_LINUX` |
+ 
+-## Remaining blockers for a usable connect session (severity)
++## Remaining blockers for connect soak
+ 
+-1. **Critical — Viewer / windowing:** egui + winit + OpenGL/Vulkan presenter to show decoded frames and host the device center (`ui::run`, `viewer` presenter).
+-2. **Critical — Input:** keyboard/mouse capture and remote injection path without Win32 hooks (`viewer` input modules).
+-3. **High — Video decode display path:** software H.264 → CPU RGBA (or VA-API later) into the Linux presenter; H.265 strategy undecided.
+-4. **High — Signaling + connect orchestration:** mostly portable already (`signal`, `rtc`, `controller`); blocked on viewer lifecycle / progress UI.
+-5. **Medium — Login UX:** CLI login should work with keyring; GUI QR/SMS still needs UI shell.
+-6. **Medium — Audio:** `cpal` + NetEq likely close; needs end-to-end session soak on Linux hosts.
+-7. **Lower — Clipboard / plugins / file transfer polish:** stubs or partial ports.
++1. **Auth / device list in GUI** — complete login (keyring + network) so the control center can list and start a connect.
++2. **End-to-end connect** — exercise `Request::Viewer` → connecting progress → soft-decode frames → `CpuRgba8` texture; confirm no GL/context sharing issues across multi-window.
++3. **Input soak** — absolute mouse + keyboard under real remote session; relative mouse / modifier edge cases; IME.
++4. **Audio** — `cpal` + NetEq on Linux hosts (mute first for video-only soak).
++5. **H.265 / hardware decode** — strategy (software vs VA-API) undecided.
++6. **Clipboard / plugins / file transfer polish** — stubs or partial ports.
+ 
+ ## Suggested next milestone
+ 
+-1. Implement `src/ui/linux.rs` with **egui-winit + egui_glow** (deps already sketched in `Cargo.toml`) enough to run the existing device-center `App` and a connecting/progress window.
+-2. Present software-decoded **CPU RGBA** frames in that shell (skip zero-copy GPU initially).
+-3. Wire **winit** keyboard/mouse events into the existing remote-input protocol (no global hooks required for first connect).
+-4. Soak-test: `login` → `devices` → `connect` with muted audio, H.264 software, auto transport.
++1. GUI login → device list refresh with a real account.
++2. Connect soak: muted audio, H.264 software, auto transport; confirm frames + input.
++3. Harden multi-window GL (shared glow contexts / make_current) and document Wayland vs X11 quirks.
++4. Optional: VA-API or better software H.265 path.
+ 
+ ## Build notes
+ 
+ - `build.rs` allows `windows` and `linux`; embeds Windows resources only on Windows; NetEq uses POSIX/Linux defines on Linux (C++ exceptions enabled for `bad_alloc`).
+ - Do not strip `LICENSE` / `THIRD_PARTY_NOTICES`.
+ - Upstream contribution should stay under OpenUUYC naming.
++- Do not push unless asked; keep Windows `cfg` paths intact.
+diff --git a/src/ui/linux.rs b/src/ui/linux.rs
+index 8e60f72..1173357 100644
+--- a/src/ui/linux.rs
++++ b/src/ui/linux.rs
+@@ -1,12 +1,708 @@
+-//! Linux egui/winit shell (milestone stub).
+-//!
+-//! TODO(linux): full event loop with egui-winit + glow (or wgpu) replacing D3D11.
+-use super::{AppFactory, WindowConfig};
+-use anyhow::{Result, bail};
+-
+-pub(super) fn run(_config: WindowConfig, _factory: AppFactory) -> Result<()> {
+-    bail!(
+-        "TODO(linux): graphical UI shell not implemented yet — use CLI subcommands \
+-         (login, devices, native-status, rtc-selftest) for now"
+-    )
++//! Linux egui + winit + glow/glutin shell (replaces D3D11 presenter).
++#![allow(unsafe_code)]
++
++use super::window_manager::{self, Event, Repaint, Request};
++use super::{AppFactory, AppSession, WindowConfig};
++use crate::viewer::windows_presenter::ConnectingWindowsRunner;
++use anyhow::{Context, Result, anyhow, bail};
++use glutin::prelude::{GlDisplay, GlSurface as _, PossiblyCurrentGlContext};
++use std::collections::HashMap;
++use std::num::NonZeroU32;
++use std::sync::Arc;
++use std::time::{Duration, Instant};
++use winit::application::ApplicationHandler;
++use winit::dpi::{LogicalSize, PhysicalPosition};
++use winit::event::WindowEvent;
++use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
++use winit::raw_window_handle::HasWindowHandle;
++use winit::window::{Window, WindowAttributes, WindowId};
++
++pub(super) fn run(config: WindowConfig, factory: AppFactory) -> Result<()> {
++    let event_loop = EventLoop::<Event>::with_user_event()
++        .build()
++        .context("create Linux desktop event loop")?;
++    let mut runner = LinuxApp {
++        main: Runner {
++            config,
++            factory: Some(factory),
++            state: None,
++            error: None,
++            proxy: event_loop.create_proxy(),
++            root: true,
++            closed: false,
++        },
++        windows: HashMap::new(),
++        viewers: HashMap::new(),
++    };
++    window_manager::install(Some(event_loop.create_proxy()));
++    event_loop
++        .run_app(&mut runner)
++        .context("run Linux egui/glow event loop")?;
++    window_manager::install(None);
++    crate::clipboard::shutdown();
++    if let Some(error) = runner.main.error.take() {
++        bail!(error);
++    }
++    Ok(())
++}
++
++struct GlowHostSurface {
++    window: Window,
++    gl_context: glutin::context::PossiblyCurrentContext,
++    gl_surface: glutin::surface::Surface<glutin::surface::WindowSurface>,
++}
++
++impl GlowHostSurface {
++    unsafe fn create(
++        event_loop: &ActiveEventLoop,
++        attributes: WindowAttributes,
++    ) -> Result<(Self, Arc<glow::Context>)> {
++        use glutin::context::NotCurrentGlContext;
++        use glutin::display::{GetGlDisplay, GlDisplay};
++        use glutin::surface::GlSurface;
++
++        let template = glutin::config::ConfigTemplateBuilder::new()
++            .prefer_hardware_accelerated(None)
++            .with_depth_size(0)
++            .with_stencil_size(0)
++            .with_transparency(false);
++
++        let (mut window_slot, gl_config) = glutin_winit::DisplayBuilder::new()
++            .with_preference(glutin_winit::ApiPreference::FallbackEgl)
++            .with_window_attributes(Some(attributes.clone()))
++            .build(event_loop, template, |mut configs| {
++                configs
++                    .next()
++                    .expect("no matching GL config for OpenUUYC Linux UI")
++            })
++            .map_err(|error| anyhow!("create GL display/config: {error}"))?;
++
++        let gl_display = gl_config.display();
++        let raw_window_handle = window_slot.as_ref().map(|window| {
++            window
++                .window_handle()
++                .expect("window handle")
++                .as_raw()
++        });
++
++        let context_attributes =
++            glutin::context::ContextAttributesBuilder::new().build(raw_window_handle);
++        let fallback = glutin::context::ContextAttributesBuilder::new()
++            .with_context_api(glutin::context::ContextApi::Gles(None))
++            .build(raw_window_handle);
++        let not_current = unsafe {
++            gl_display
++                .create_context(&gl_config, &context_attributes)
++                .or_else(|_| gl_display.create_context(&gl_config, &fallback))
++                .context("create OpenGL context")?
++        };
++
++        let window = match window_slot.take() {
++            Some(window) => window,
++            None => glutin_winit::finalize_window(event_loop, attributes, &gl_config)
++                .context("finalize GL window")?,
++        };
++
++        let (width, height): (u32, u32) = window.inner_size().into();
++        let width = NonZeroU32::new(width).unwrap_or(NonZeroU32::MIN);
++        let height = NonZeroU32::new(height).unwrap_or(NonZeroU32::MIN);
++        let surface_attributes =
++            glutin::surface::SurfaceAttributesBuilder::<glutin::surface::WindowSurface>::new()
++                .build(
++                    window.window_handle().expect("window handle").as_raw(),
++                    width,
++                    height,
++                );
++        let gl_surface = unsafe {
++            gl_display
++                .create_window_surface(&gl_config, &surface_attributes)
++                .context("create GL window surface")?
++        };
++        let gl_context = not_current
++            .make_current(&gl_surface)
++            .context("make GL context current")?;
++        let _ = gl_surface.set_swap_interval(
++            &gl_context,
++            glutin::surface::SwapInterval::Wait(NonZeroU32::MIN),
++        );
++
++        let gl = Arc::new(unsafe {
++            glow::Context::from_loader_function_cstr(|s| gl_display.get_proc_address(s))
++        });
++        Ok((
++            Self {
++                window,
++                gl_context,
++                gl_surface,
++            },
++            gl,
++        ))
++    }
++
++    fn resize(&self, size: winit::dpi::PhysicalSize<u32>) {
++        if let (Ok(w), Ok(h)) = (size.width.try_into(), size.height.try_into()) {
++            self.gl_surface.resize(&self.gl_context, w, h);
++        }
++    }
++
++    fn swap(&self) -> Result<()> {
++        self.gl_surface
++            .swap_buffers(&self.gl_context)
++            .context("swap GL buffers")
++    }
++}
++
++fn window_attributes(config: &WindowConfig) -> WindowAttributes {
++    let viewport = &config.viewport;
++    let mut attributes = WindowAttributes::default()
++        .with_visible(viewport.visible.unwrap_or(false))
++        .with_title(
++            viewport
++                .title
++                .clone()
++                .unwrap_or_else(|| crate::APP_NAME.to_owned()),
++        )
++        .with_window_icon(Some(super::branding::window_icon()))
++        .with_decorations(true)
++        .with_resizable(viewport.resizable.unwrap_or(true));
++    if let Some(size) = viewport.inner_size {
++        attributes = attributes.with_inner_size(LogicalSize::new(size.x as f64, size.y as f64));
++    }
++    if let Some(size) = viewport.min_inner_size {
++        attributes = attributes.with_min_inner_size(LogicalSize::new(size.x as f64, size.y as f64));
++    }
++    if let Some(size) = viewport.max_inner_size {
++        attributes = attributes.with_max_inner_size(LogicalSize::new(size.x as f64, size.y as f64));
++    }
++    attributes
++}
++
++struct DesktopWindow {
++    app: AppSession,
++    surface: GlowHostSurface,
++    painter: egui_glow::Painter,
++    context: egui::Context,
++    input: egui_winit::State,
++    viewport: egui::ViewportInfo,
++    close_requested: bool,
++    show_after_present: bool,
++    next_repaint: Option<Instant>,
++    last_frame: Option<Instant>,
++    interval: Duration,
++}
++
++impl Drop for DesktopWindow {
++    fn drop(&mut self) {
++        self.surface.window.set_visible(false);
++        self.painter.destroy();
++    }
++}
++
++impl DesktopWindow {
++    fn schedule(&mut self, when: Instant) {
++        let when = self
++            .last_frame
++            .map_or(when, |last| when.max(last + self.interval));
++        self.next_repaint = Some(self.next_repaint.map_or(when, |old| old.min(when)));
++    }
++
++    fn render(&mut self) -> Result<()> {
++        use glow::HasContext as _;
++
++        self.next_repaint = None;
++        self.last_frame = Some(Instant::now());
++        egui_winit::update_viewport_info(
++            &mut self.viewport,
++            &self.context,
++            &self.surface.window,
++            false,
++        );
++        let mut raw = self.input.take_egui_input(&self.surface.window);
++        raw.viewports
++            .insert(egui::ViewportId::ROOT, self.viewport.clone());
++        if self.close_requested {
++            raw.viewports
++                .get_mut(&egui::ViewportId::ROOT)
++                .expect("root viewport")
++                .events
++                .push(egui::ViewportEvent::Close);
++        }
++        self.viewport.events.clear();
++
++        let output = self.context.run_ui(raw, |ui| {
++            self.app.0.ui(ui);
++            super::controls::show_notices(ui.ctx());
++        });
++
++        let egui::FullOutput {
++            platform_output,
++            mut textures_delta,
++            shapes,
++            pixels_per_point,
++            viewport_output,
++        } = output;
++
++        self.input
++            .handle_platform_output(&self.surface.window, platform_output);
++
++        if let Some(root) = viewport_output.get(&egui::ViewportId::ROOT) {
++            for command in &root.commands {
++                match command {
++                    egui::ViewportCommand::Close => self.close_requested = true,
++                    egui::ViewportCommand::CancelClose => self.close_requested = false,
++                    _ => {}
++                }
++            }
++            let mut actions = Vec::new();
++            egui_winit::process_viewport_commands(
++                &self.context,
++                &mut self.viewport,
++                root.commands.iter().cloned().filter(|command| {
++                    !matches!(
++                        command,
++                        egui::ViewportCommand::Close | egui::ViewportCommand::CancelClose
++                    )
++                }),
++                &self.surface.window,
++                &mut actions,
++            );
++            if let Some(when) = Instant::now().checked_add(root.repaint_delay) {
++                self.schedule(when);
++            }
++        }
++
++        if self.close_requested && self.app.0.on_close_requested() {
++            self.surface.window.set_visible(false);
++            return Ok(());
++        }
++        self.close_requested = false;
++
++        for (id, deltas) in std::mem::take(&mut textures_delta.set) {
++            for delta in deltas {
++                self.painter.set_texture(id, &delta);
++            }
++        }
++
++        let clipped = self.context.tessellate(shapes, pixels_per_point);
++        let size = self.surface.window.inner_size();
++        unsafe {
++            self.painter.gl().clear_color(0.08, 0.09, 0.12, 1.0);
++            self.painter.gl().clear(glow::COLOR_BUFFER_BIT);
++        }
++        self.painter
++            .paint_primitives([size.width, size.height], pixels_per_point, &clipped);
++        for id in std::mem::take(&mut textures_delta.free) {
++            self.painter.free_texture(id);
++        }
++        self.surface.swap()?;
++        if self.show_after_present {
++            self.surface.window.set_visible(true);
++            self.show_after_present = false;
++        }
++        Ok(())
++    }
++}
++
++struct Runner {
++    root: bool,
++    closed: bool,
++    config: WindowConfig,
++    factory: Option<AppFactory>,
++    state: Option<DesktopWindow>,
++    error: Option<String>,
++    proxy: EventLoopProxy<Event>,
++}
++
++impl Runner {
++    fn fail(&mut self, event_loop: &ActiveEventLoop, error: anyhow::Error) {
++        self.error = Some(format!("{error:#}"));
++        self.state.take();
++        self.closed = true;
++        if self.root {
++            event_loop.exit();
++        }
++    }
++
++    fn create(&mut self, event_loop: &ActiveEventLoop) -> Result<()> {
++        if self.state.is_some() {
++            return Ok(());
++        }
++        let attributes = window_attributes(&self.config).with_visible(false);
++        let (surface, gl) = unsafe { GlowHostSurface::create(event_loop, attributes)? };
++        if self.config.centered
++            && let Some(monitor) = surface.window.current_monitor()
++        {
++            let outer = surface.window.outer_size();
++            let size = monitor.size();
++            let origin = monitor.position();
++            surface.window.set_outer_position(PhysicalPosition::new(
++                origin.x + (size.width as i64 - outer.width as i64).max(0) as i32 / 2,
++                origin.y + (size.height as i64 - outer.height as i64).max(0) as i32 / 2,
++            ));
++        }
++
++        let painter = egui_glow::Painter::new(Arc::clone(&gl), "", None, true)
++            .map_err(|error| anyhow!("create egui glow painter: {error}"))?;
++        let context = egui::Context::default();
++        context.set_embed_viewports(true);
++        let input = egui_winit::State::new(
++            context.clone(),
++            egui::ViewportId::ROOT,
++            &surface.window,
++            Some(surface.window.scale_factor() as f32),
++            surface.window.theme(),
++            Some(painter.max_texture_side()),
++        );
++        let mut viewport = egui::ViewportInfo::default();
++        egui_winit::update_viewport_info(&mut viewport, &context, &surface.window, true);
++        let proxy = self.proxy.clone();
++        let window_id = surface.window.id();
++        context.set_request_repaint_callback(move |info| {
++            if info.viewport_id == egui::ViewportId::ROOT
++                && let Some(when) = Instant::now().checked_add(info.delay)
++            {
++                let _ = proxy.send_event(Event::Repaint(Repaint {
++                    window: window_id,
++                    generation: 0,
++                    pass: info.current_cumulative_pass_nr,
++                    when,
++                }));
++            }
++        });
++        let factory = self
++            .factory
++            .take()
++            .context("desktop factory already consumed")?;
++        let graphics = format!("OpenGL (glow) — {}", glow_renderer_string(&gl));
++        let app = AppSession(factory(&context, Some(graphics)));
++        let refresh = surface
++            .window
++            .current_monitor()
++            .and_then(|monitor| monitor.refresh_rate_millihertz())
++            .filter(|rate| *rate != 0)
++            .unwrap_or(60_000);
++        let show_after_present = self.config.viewport.visible.unwrap_or(true);
++        self.state = Some(DesktopWindow {
++            app,
++            surface,
++            painter,
++            context,
++            input,
++            viewport,
++            close_requested: false,
++            show_after_present,
++            next_repaint: Some(Instant::now()),
++            last_frame: None,
++            interval: Duration::from_secs_f64(1000.0 / f64::from(refresh)),
++        });
++        let state = self.state.as_mut().expect("created desktop state");
++        state.render()?;
++        state.app.0.on_focus_changed(state.surface.window.has_focus());
++        self.finish_close(event_loop);
++        Ok(())
++    }
++
++    fn finish_close(&mut self, event_loop: &ActiveEventLoop) {
++        if self
++            .state
++            .as_ref()
++            .is_some_and(|state| state.close_requested)
++        {
++            self.closed = true;
++            if self.root {
++                event_loop.exit();
++            }
++        }
++    }
++}
++
++fn glow_renderer_string(gl: &glow::Context) -> String {
++    use glow::HasContext as _;
++    unsafe {
++        let vendor = gl.get_parameter_string(glow::VENDOR);
++        let renderer = gl.get_parameter_string(glow::RENDERER);
++        format!("{vendor} / {renderer}")
++    }
++}
++
++impl ApplicationHandler<Event> for Runner {
++    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
++        if let Err(error) = self.create(event_loop) {
++            self.fail(event_loop, error);
++        }
++    }
++
++    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
++        let Some(state) = self
++            .state
++            .as_mut()
++            .filter(|state| state.surface.window.id() == id)
++        else {
++            return;
++        };
++        let response = state.input.on_window_event(&state.surface.window, &event);
++        let result = match event {
++            WindowEvent::Focused(focused) => {
++                state.app.0.on_focus_changed(focused);
++                state.schedule(Instant::now());
++                Ok(())
++            }
++            WindowEvent::CloseRequested => {
++                state.close_requested = true;
++                state.render()
++            }
++            WindowEvent::Destroyed => {
++                self.closed = true;
++                if self.root {
++                    event_loop.exit();
++                }
++                Ok(())
++            }
++            WindowEvent::Resized(size) => {
++                if size.width > 0 && size.height > 0 {
++                    state.surface.resize(size);
++                }
++                state.schedule(Instant::now());
++                Ok(())
++            }
++            WindowEvent::RedrawRequested => state.render(),
++            _ => {
++                if response.repaint {
++                    state.schedule(Instant::now());
++                }
++                Ok(())
++            }
++        };
++        if let Err(error) = result {
++            self.fail(event_loop, error);
++            return;
++        }
++        self.finish_close(event_loop);
++    }
++
++    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: Event) {
++        let Event::Repaint(event) = event else {
++            return;
++        };
++        if let Some(state) = &mut self.state {
++            if state.surface.window.id() != event.window {
++                return;
++            }
++            let current = state.context.cumulative_pass_nr();
++            if current == event.pass || current == event.pass.saturating_add(1) {
++                state.schedule(event.when);
++            }
++        }
++    }
++
++    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
++        if let Some(state) = &mut self.state {
++            if let Some(when) = state.next_repaint {
++                if when <= Instant::now() {
++                    state.next_repaint = None;
++                    if state.show_after_present {
++                        if let Err(error) = state.render() {
++                            self.fail(event_loop, error);
++                            return;
++                        }
++                    } else {
++                        state.surface.window.request_redraw();
++                    }
++                    event_loop.set_control_flow(
++                        state
++                            .next_repaint
++                            .map_or(ControlFlow::Wait, ControlFlow::WaitUntil),
++                    );
++                } else {
++                    event_loop.set_control_flow(ControlFlow::WaitUntil(when));
++                }
++            } else {
++                event_loop.set_control_flow(ControlFlow::Wait);
++            }
++        }
++        self.finish_close(event_loop);
++    }
++
++    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
++        self.state.take();
++    }
++}
++
++struct ManagedViewer {
++    runner: ConnectingWindowsRunner,
++    done: Option<tokio::sync::oneshot::Sender<Result<()>>>,
++}
++
++impl ManagedViewer {
++    fn finish(&mut self, event_loop: &ActiveEventLoop) {
++        self.runner.exiting(event_loop);
++        if let Some(done) = self.done.take() {
++            let _ = done.send(
++                self.runner
++                    .error()
++                    .map_or(Ok(()), |error| Err(anyhow!(error))),
++            );
++        }
++    }
++}
++
++struct LinuxApp {
++    windows: HashMap<String, Runner>,
++    viewers: HashMap<String, ManagedViewer>,
++    main: Runner,
++}
++
++impl LinuxApp {
++    fn retire(&mut self, event_loop: &ActiveEventLoop) {
++        self.windows.retain(|_, window| !window.closed);
++        self.viewers.retain(|_, viewer| {
++            if viewer.runner.closed() {
++                viewer.finish(event_loop);
++                false
++            } else {
++                true
++            }
++        });
++    }
++
++    fn focus(&self, key: &str) {
++        if let Some(window) = self.windows.get(key).and_then(|r| r.state.as_ref()) {
++            window.surface.window.set_minimized(false);
++            window.surface.window.set_visible(true);
++            window.surface.window.focus_window();
++        }
++        if let Some(viewer) = self.viewers.get(key) {
++            viewer.runner.focus();
++        }
++    }
++}
++
++impl ApplicationHandler<Event> for LinuxApp {
++    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
++        self.main.resumed(event_loop);
++    }
++
++    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
++        if self
++            .main
++            .state
++            .as_ref()
++            .is_some_and(|s| s.surface.window.id() == id)
++        {
++            self.main.window_event(event_loop, id, event);
++        } else if let Some(window) = self
++            .windows
++            .values_mut()
++            .find(|w| w.state.as_ref().is_some_and(|s| s.surface.window.id() == id))
++        {
++            window.window_event(event_loop, id, event);
++        } else if let Some(viewer) = self.viewers.values_mut().find(|v| v.runner.owns(id)) {
++            viewer.runner.window_event(event_loop, id, event);
++        }
++        self.retire(event_loop);
++    }
++
++    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: Event) {
++        match event {
++            Event::Repaint(event) => {
++                if self
++                    .main
++                    .state
++                    .as_ref()
++                    .is_some_and(|s| s.surface.window.id() == event.window)
++                {
++                    self.main.user_event(event_loop, Event::Repaint(event));
++                } else if let Some(window) = self.windows.values_mut().find(|w| {
++                    w.state
++                        .as_ref()
++                        .is_some_and(|s| s.surface.window.id() == event.window)
++                }) {
++                    window.user_event(event_loop, Event::Repaint(event));
++                } else if let Some(viewer) = self
++                    .viewers
++                    .values_mut()
++                    .find(|v| v.runner.owns(event.window))
++                {
++                    viewer.runner.user_event(event_loop, Event::Repaint(event));
++                }
++            }
++            Event::Request(Request::Focus(key)) => self.focus(&key),
++            Event::Request(Request::Open {
++                key,
++                config,
++                factory,
++            }) => {
++                if self.windows.contains_key(&key) {
++                    self.focus(&key);
++                    return;
++                }
++                let mut window = Runner {
++                    config,
++                    factory: Some(factory),
++                    state: None,
++                    error: None,
++                    proxy: self.main.proxy.clone(),
++                    root: false,
++                    closed: false,
++                };
++                window.resumed(event_loop);
++                if !window.closed {
++                    self.windows.insert(key, window);
++                }
++            }
++            Event::Request(Request::Viewer { key, config, done }) => {
++                if self.viewers.contains_key(&key) {
++                    self.focus(&key);
++                    let _ = done.send(Err(anyhow!("观看窗口已打开")));
++                    return;
++                }
++                let mut viewer = ManagedViewer {
++                    runner: ConnectingWindowsRunner::new(
++                        config,
++                        true,
++                        self.main.proxy.clone(),
++                        true,
++                    ),
++                    done: Some(done),
++                };
++                viewer.runner.resumed(event_loop);
++                self.viewers.insert(key, viewer);
++            }
++        }
++        self.retire(event_loop);
++    }
++
++    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
++        let mut wake = None::<Instant>;
++        self.main.about_to_wait(event_loop);
++        if let ControlFlow::WaitUntil(at) = event_loop.control_flow() {
++            wake = Some(at);
++        }
++        for window in self.windows.values_mut() {
++            event_loop.set_control_flow(ControlFlow::Wait);
++            window.about_to_wait(event_loop);
++            if let ControlFlow::WaitUntil(at) = event_loop.control_flow() {
++                wake = Some(wake.map_or(at, |old| old.min(at)));
++            }
++        }
++        for viewer in self.viewers.values_mut() {
++            event_loop.set_control_flow(ControlFlow::Wait);
++            viewer.runner.about_to_wait(event_loop);
++            if let ControlFlow::WaitUntil(at) = event_loop.control_flow() {
++                wake = Some(wake.map_or(at, |old| old.min(at)));
++            }
++        }
++        self.retire(event_loop);
++        event_loop.set_control_flow(wake.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
++    }
++
++    fn exiting(&mut self, event_loop: &ActiveEventLoop) {
++        window_manager::install(None);
++        for viewer in self.viewers.values_mut() {
++            viewer.finish(event_loop);
++        }
++        self.viewers.clear();
++        self.windows.clear();
++        self.main.exiting(event_loop);
++    }
+ }
+diff --git a/src/viewer/linux/windows_presenter.rs b/src/viewer/linux/windows_presenter.rs
+index 32e087b..07eac94 100644
+--- a/src/viewer/linux/windows_presenter.rs
++++ b/src/viewer/linux/windows_presenter.rs
+@@ -1,9 +1,26 @@
+-//! Linux stub for the D3D11 viewer presenter.
+-use crate::viewer::{
+-    ConnectionProgress, NativeViewerSession, ViewerDisplayHandle, ViewerWindowEvent,
++//! Linux viewer presenter: connection progress + CPU RGBA video + winit input.
++#![allow(unsafe_code)]
++
++use super::{
++    ConnectionProgress, ConnectionProgressApp, DecodedVideoFrame, NativeViewerSession,
++    ViewerDisplayHandle, ViewerWindowEvent, configure_viewer_visuals, install_system_cjk_font,
++    mutex_lock, take_next_frame,
+ };
+-use anyhow::{Result, bail};
++use crate::decoder::{RenderSurface, Rgba8};
++use crate::remote_input::{BUTTONS, MouseMode, RemoteInput};
++use crate::ui::window_manager::{Event as UiEvent, Repaint as UiRepaintEvent};
++use anyhow::{Context, Result, anyhow, bail};
++use glutin::prelude::{GlDisplay, GlSurface as _, PossiblyCurrentGlContext};
++use std::num::NonZeroU32;
++use std::sync::Arc;
+ use std::sync::mpsc as std_mpsc;
++use std::time::{Duration, Instant};
++use winit::application::ApplicationHandler;
++use winit::dpi::{LogicalSize, PhysicalSize};
++use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
++use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
++use winit::raw_window_handle::HasWindowHandle;
++use winit::window::{Window, WindowAttributes, WindowId};
+ 
+ pub struct ConnectingWindowsRunConfig {
+     pub alias: String,
+@@ -12,13 +29,760 @@ pub struct ConnectingWindowsRunConfig {
+     pub display_sender: tokio::sync::oneshot::Sender<ViewerDisplayHandle>,
+ }
+ 
+-pub fn run_connecting(_config: ConnectingWindowsRunConfig) -> Result<()> {
+-    bail!("TODO(linux): viewer window / video presenter not implemented")
++pub fn run_connecting(config: ConnectingWindowsRunConfig) -> Result<()> {
++    let event_loop = EventLoop::<UiEvent>::with_user_event()
++        .build()
++        .context("create Linux viewer event loop")?;
++    let mut runner = ConnectingWindowsRunner::new(config, true, event_loop.create_proxy(), false);
++    event_loop
++        .run_app(&mut runner)
++        .context("run Linux viewer event loop")?;
++    if let Some(error) = runner.error() {
++        bail!(error);
++    }
++    Ok(())
++}
++
++pub fn run(session: NativeViewerSession) -> Result<()> {
++    // Standalone playback without a prior connecting window.
++    let (progress_tx, progress_rx) = std_mpsc::channel();
++    let mut ready = ConnectionProgress::working(13, "已连接", "播放窗口已打开");
++    ready.state = super::ConnectionProgressState::Ready;
++    let _ = progress_tx.send(ready);
++    let (session_tx, session_rx) = std_mpsc::channel();
++    let _ = session_tx.send(ViewerWindowEvent::Playing(Box::new(session)));
++    let (display_tx, _display_rx) = tokio::sync::oneshot::channel();
++    run_connecting(ConnectingWindowsRunConfig {
++        alias: "OpenUUYC".into(),
++        progress: progress_rx,
++        session: session_rx,
++        display_sender: display_tx,
++    })
++}
++
++struct GlowHostSurface {
++    window: Window,
++    gl_context: glutin::context::PossiblyCurrentContext,
++    gl_surface: glutin::surface::Surface<glutin::surface::WindowSurface>,
++}
++
++impl GlowHostSurface {
++    unsafe fn create(
++        event_loop: &ActiveEventLoop,
++        attributes: WindowAttributes,
++    ) -> Result<(Self, Arc<glow::Context>)> {
++        use glutin::context::NotCurrentGlContext;
++        use glutin::display::{GetGlDisplay, GlDisplay};
++        use glutin::surface::GlSurface;
++
++        let template = glutin::config::ConfigTemplateBuilder::new()
++            .prefer_hardware_accelerated(None)
++            .with_depth_size(0)
++            .with_stencil_size(0)
++            .with_transparency(false);
++        let (mut window_slot, gl_config) = glutin_winit::DisplayBuilder::new()
++            .with_preference(glutin_winit::ApiPreference::FallbackEgl)
++            .with_window_attributes(Some(attributes.clone()))
++            .build(event_loop, template, |mut configs| {
++                configs.next().expect("no matching GL config")
++            })
++            .map_err(|error| anyhow!("create viewer GL display: {error}"))?;
++        let gl_display = gl_config.display();
++        let raw = window_slot
++            .as_ref()
++            .map(|w| w.window_handle().expect("handle").as_raw());
++        let attrs = glutin::context::ContextAttributesBuilder::new().build(raw);
++        let fallback = glutin::context::ContextAttributesBuilder::new()
++            .with_context_api(glutin::context::ContextApi::Gles(None))
++            .build(raw);
++        let not_current = unsafe {
++            gl_display
++                .create_context(&gl_config, &attrs)
++                .or_else(|_| gl_display.create_context(&gl_config, &fallback))
++                .context("create viewer GL context")?
++        };
++        let window = match window_slot.take() {
++            Some(window) => window,
++            None => glutin_winit::finalize_window(event_loop, attributes, &gl_config)
++                .context("finalize viewer window")?,
++        };
++        let (width, height): (u32, u32) = window.inner_size().into();
++        let surface_attributes =
++            glutin::surface::SurfaceAttributesBuilder::<glutin::surface::WindowSurface>::new()
++                .build(
++                    window.window_handle().expect("handle").as_raw(),
++                    NonZeroU32::new(width).unwrap_or(NonZeroU32::MIN),
++                    NonZeroU32::new(height).unwrap_or(NonZeroU32::MIN),
++                );
++        let gl_surface = unsafe {
++            gl_display
++                .create_window_surface(&gl_config, &surface_attributes)
++                .context("create viewer surface")?
++        };
++        let gl_context = not_current
++            .make_current(&gl_surface)
++            .context("make viewer GL current")?;
++        let _ = gl_surface.set_swap_interval(
++            &gl_context,
++            glutin::surface::SwapInterval::Wait(NonZeroU32::MIN),
++        );
++        let gl = Arc::new(unsafe {
++            glow::Context::from_loader_function_cstr(|s| gl_display.get_proc_address(s))
++        });
++        Ok((
++            Self {
++                window,
++                gl_context,
++                gl_surface,
++            },
++            gl,
++        ))
++    }
++
++    fn resize(&self, size: PhysicalSize<u32>) {
++        if let (Ok(w), Ok(h)) = (size.width.try_into(), size.height.try_into()) {
++            self.gl_surface.resize(&self.gl_context, w, h);
++        }
++    }
++
++    fn swap(&self) -> Result<()> {
++        self.gl_surface
++            .swap_buffers(&self.gl_context)
++            .context("viewer swap buffers")
++    }
++}
++
++struct VideoState {
++    session: NativeViewerSession,
++    texture: Option<egui::TextureHandle>,
++    frame_size: (u32, u32),
++    pointer_in_video: bool,
++    last_pos: Option<egui::Pos2>,
++    video_rect: egui::Rect,
++    owner: u64,
++}
++
++impl VideoState {
++    fn new(session: NativeViewerSession) -> Self {
++        Self {
++            session,
++            texture: None,
++            frame_size: (0, 0),
++            pointer_in_video: false,
++            last_pos: None,
++            video_rect: egui::Rect::NOTHING,
++            owner: 1,
++        }
++    }
++
++    fn input(&self) -> &RemoteInput {
++        self.session.stream_control.mouse()
++    }
++
++    fn pull_frame(&mut self, ctx: &egui::Context) {
++        use crate::performance::RenderedFrameTiming;
++        let Some(frame) = take_next_frame(
++            &mut mutex_lock(&self.session.frame_queue),
++            &self.session.performance,
++        ) else {
++            return;
++        };
++        let RenderSurface::CpuRgba8(pixels) = frame.surface else {
++            // Linux has no D3D11 surfaces; drop unexpected frames.
++            return;
++        };
++        let rgba = rgba8_to_bytes(&pixels);
++        let image = egui::ColorImage::from_rgba_unmultiplied(
++            [frame.width as usize, frame.height as usize],
++            &rgba,
++        );
++        match &mut self.texture {
++            Some(texture) => texture.set(image, egui::TextureOptions::LINEAR),
++            None => {
++                self.texture = Some(ctx.load_texture(
++                    "openuuyc-linux-video",
++                    image,
++                    egui::TextureOptions::LINEAR,
++                ));
++            }
++        }
++        self.frame_size = (frame.width, frame.height);
++        self.session.performance.record_rendered_frame(RenderedFrameTiming {
++            is_new_picture: frame.is_new_picture,
++            width: frame.width,
++            height: frame.height,
++            decoded_at: frame.decoded_at,
++            local: Duration::ZERO,
++            assembly: frame.assembly_delay,
++            input_queue: frame.input_queue_delay,
++            decode_pipeline: frame.decode_pipeline_delay,
++            surface_transfer: Duration::ZERO,
++            present_wait: Duration::ZERO,
++            render_queue: frame.decoded_at.elapsed(),
++            sender_capture_at: frame.sender_timing.capture_at,
++            sender_capture: frame.sender_timing.capture_delay,
++            sender_encode: frame.sender_timing.encode_delay,
++            sender_pacer: frame.sender_timing.pacer_delay,
++            sender_total: frame.sender_timing.sending_delay,
++            transport: frame.sender_timing.transport_delay,
++        });
++        self.session.frame_wake.notify();
++    }
++}
++
++fn rgba8_to_bytes(pixels: &[Rgba8]) -> Vec<u8> {
++    let mut out = Vec::with_capacity(pixels.len() * 4);
++    for px in pixels {
++        out.extend_from_slice(&px.0);
++    }
++    out
++}
++
++/// Placeholder type kept for window_manager type-checks.
++pub struct ConnectingWindowsRunner {
++    embedded: bool,
++    close_requested: bool,
++    attributes: WindowAttributes,
++    alias: String,
++    progress: Option<std_mpsc::Receiver<ConnectionProgress>>,
++    session: std_mpsc::Receiver<ViewerWindowEvent>,
++    display_sender: Option<tokio::sync::oneshot::Sender<ViewerDisplayHandle>>,
++    surface: Option<GlowHostSurface>,
++    painter: Option<egui_glow::Painter>,
++    context: Option<egui::Context>,
++    input: Option<egui_winit::State>,
++    viewport: egui::ViewportInfo,
++    connecting: Option<ConnectionProgressApp>,
++    playing: Option<VideoState>,
++    fatal_error: Option<String>,
++    next_repaint: Option<Instant>,
++    repaint_proxy: EventLoopProxy<UiEvent>,
++    ui_generation: u64,
++    modifiers: u8,
++}
++
++impl ConnectingWindowsRunner {
++    pub(crate) fn new(
++        config: ConnectingWindowsRunConfig,
++        needs_display: bool,
++        proxy: EventLoopProxy<UiEvent>,
++        embedded: bool,
++    ) -> Self {
++        Self {
++            attributes: WindowAttributes::default()
++                .with_visible(false)
++                .with_title(format!("{}{}", crate::VIEWER_TITLE_PREFIX, config.alias))
++                .with_window_icon(Some(crate::ui::branding::window_icon()))
++                .with_decorations(true)
++                .with_inner_size(LogicalSize::new(1280.0, 760.0))
++                .with_min_inner_size(LogicalSize::new(760.0, 520.0)),
++            alias: config.alias,
++            progress: Some(config.progress),
++            session: config.session,
++            display_sender: needs_display.then_some(config.display_sender),
++            surface: None,
++            painter: None,
++            context: None,
++            input: None,
++            viewport: egui::ViewportInfo::default(),
++            connecting: None,
++            playing: None,
++            fatal_error: None,
++            next_repaint: Some(Instant::now()),
++            repaint_proxy: proxy,
++            embedded,
++            ui_generation: 1,
++            close_requested: false,
++            modifiers: 0,
++        }
++    }
++
++    fn exit(&mut self, event_loop: &ActiveEventLoop) {
++        self.close_requested = true;
++        if !self.embedded {
++            event_loop.exit();
++        }
++    }
++
++    pub(crate) fn closed(&self) -> bool {
++        self.close_requested
++    }
++
++    pub(crate) fn error(&self) -> Option<String> {
++        self.fatal_error.clone()
++    }
++
++    pub(crate) fn owns(&self, id: WindowId) -> bool {
++        self.surface.as_ref().is_some_and(|s| s.window.id() == id)
++    }
++
++    pub(crate) fn focus(&self) {
++        if let Some(surface) = &self.surface {
++            surface.window.set_visible(true);
++            surface.window.focus_window();
++        }
++    }
++
++    fn fail(&mut self, event_loop: &ActiveEventLoop, error: String) {
++        self.fatal_error = Some(error);
++        self.exit(event_loop);
++    }
++
++    fn receive_session_events(&mut self) -> Result<()> {
++        while let Ok(event) = self.session.try_recv() {
++            if self.close_requested {
++                continue;
++            }
++            match event {
++                ViewerWindowEvent::Close => self.close_requested = true,
++                ViewerWindowEvent::Playing(session) => {
++                    self.connecting = None;
++                    let title = session.title.clone();
++                    if let Some(surface) = &self.surface {
++                        surface.window.set_title(&title);
++                    }
++                    let mut video = VideoState::new(*session);
++                    video.session.frame_wake.install_render_thread(std::thread::current());
++                    self.playing = Some(video);
++                    self.next_repaint = Some(Instant::now());
++                }
++                ViewerWindowEvent::Reconnect {
++                    alias,
++                    progress,
++                    display,
++                    ..
++                } => {
++                    self.alias = alias.clone();
++                    self.playing = None;
++                    self.connecting = Some(ConnectionProgressApp::new(alias, progress));
++                    if let Some(sender) = self.display_sender.take() {
++                        let _ = sender.send(ViewerDisplayHandle::default());
++                    } else {
++                        let _ = display.send(ViewerDisplayHandle::default());
++                    }
++                    if let Some(surface) = &self.surface {
++                        surface.window.set_title(&format!(
++                            "{}{}",
++                            crate::VIEWER_TITLE_PREFIX,
++                            self.alias
++                        ));
++                    }
++                }
++            }
++        }
++        Ok(())
++    }
++
++    fn render(&mut self) -> Result<()> {
++        use glow::HasContext as _;
++
++        let Some(surface) = self.surface.as_mut() else {
++            return Ok(());
++        };
++        let Some(painter) = self.painter.as_mut() else {
++            return Ok(());
++        };
++        let Some(context) = self.context.as_mut() else {
++            return Ok(());
++        };
++        let Some(input) = self.input.as_mut() else {
++            return Ok(());
++        };
++
++        self.next_repaint = None;
++        egui_winit::update_viewport_info(&mut self.viewport, context, &surface.window, false);
++        let mut raw = input.take_egui_input(&surface.window);
++        raw.viewports
++            .insert(egui::ViewportId::ROOT, self.viewport.clone());
++        if self.close_requested {
++            raw.viewports
++                .get_mut(&egui::ViewportId::ROOT)
++                .expect("root")
++                .events
++                .push(egui::ViewportEvent::Close);
++        }
++        self.viewport.events.clear();
++
++        if let Some(video) = &mut self.playing {
++            video.pull_frame(context);
++        }
++
++        let mut pointer_in_video = false;
++        let mut video_rect = egui::Rect::NOTHING;
++        let mut close = false;
++        let alias = self.alias.clone();
++        let output = context.run_ui(raw, |ui| {
++            if let Some(progress) = &mut self.connecting {
++                progress.draw(ui);
++            } else if let Some(video) = &mut self.playing {
++                egui::CentralPanel::default()
++                    .frame(egui::Frame::new().fill(egui::Color32::from_rgb(12, 14, 18)))
++                    .show(ui, |ui| {
++                        ui.horizontal(|ui| {
++                            ui.label(
++                                egui::RichText::new(&alias)
++                                    .size(crate::ui::theme::SMALL)
++                                    .color(crate::ui::theme::MUTED),
++                            );
++                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
++                                if ui.button("关闭").clicked() {
++                                    close = true;
++                                }
++                                let mode = video.input().mode();
++                                ui.label(format!("鼠标模式: {mode:?}"));
++                            });
++                        });
++                        ui.separator();
++                        let available = ui.available_rect_before_wrap();
++                        if let Some(texture) = &video.texture {
++                            let (fw, fh) = video.frame_size;
++                            let fit = fit_rect(available, fw as f32, fh as f32);
++                            let response = ui.allocate_rect(fit, egui::Sense::click_and_drag());
++                            ui.painter().image(
++                                texture.id(),
++                                fit,
++                                egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
++                                egui::Color32::WHITE,
++                            );
++                            pointer_in_video = response.hovered();
++                            video_rect = fit;
++                            if response.hovered() {
++                                ui.ctx().request_repaint();
++                            }
++                        } else {
++                            ui.centered_and_justified(|ui| {
++                                ui.label("等待画面…");
++                            });
++                            ui.ctx().request_repaint_after(Duration::from_millis(33));
++                        }
++                    });
++            } else {
++                ui.centered_and_justified(|ui| ui.label("正在准备观看窗口…"));
++            }
++            crate::ui::controls::show_notices(ui.ctx());
++        });
++
++        if let Some(video) = &mut self.playing {
++            video.pointer_in_video = pointer_in_video;
++            video.video_rect = video_rect;
++        }
++        if close {
++            self.close_requested = true;
++        }
++
++        let egui::FullOutput {
++            platform_output,
++            mut textures_delta,
++            shapes,
++            pixels_per_point,
++            viewport_output,
++        } = output;
++        input.handle_platform_output(&surface.window, platform_output);
++        if let Some(root) = viewport_output.get(&egui::ViewportId::ROOT) {
++            for command in &root.commands {
++                if matches!(command, egui::ViewportCommand::Close) {
++                    self.close_requested = true;
++                }
++            }
++            if let Some(when) = Instant::now().checked_add(root.repaint_delay) {
++                self.next_repaint = Some(self.next_repaint.map_or(when, |old| old.min(when)));
++            }
++        }
++
++        for (id, deltas) in std::mem::take(&mut textures_delta.set) {
++            for delta in deltas {
++                painter.set_texture(id, &delta);
++            }
++        }
++        let clipped = context.tessellate(shapes, pixels_per_point);
++        let size = surface.window.inner_size();
++        unsafe {
++            painter.gl().clear_color(0.05, 0.06, 0.08, 1.0);
++            painter.gl().clear(glow::COLOR_BUFFER_BIT);
++        }
++        painter.paint_primitives([size.width, size.height], pixels_per_point, &clipped);
++        for id in std::mem::take(&mut textures_delta.free) {
++            painter.free_texture(id);
++        }
++        surface.swap()?;
++        if !surface.window.is_visible().unwrap_or(true) {
++            surface.window.set_visible(true);
++        }
++        Ok(())
++    }
++
++}
++
++fn fit_rect(available: egui::Rect, frame_w: f32, frame_h: f32) -> egui::Rect {
++    if frame_w <= 0.0 || frame_h <= 0.0 {
++        return available;
++    }
++    let scale = (available.width() / frame_w)
++        .min(available.height() / frame_h)
++        .max(0.0);
++    let size = egui::vec2(frame_w * scale, frame_h * scale);
++    egui::Rect::from_center_size(available.center(), size)
+ }
+ 
+-pub fn run(_session: NativeViewerSession) -> Result<()> {
+-    bail!("TODO(linux): viewer window / video presenter not implemented")
++fn mouse_button_code(button: MouseButton) -> Option<u32> {
++    match button {
++        MouseButton::Left => Some(BUTTONS[0]),
++        MouseButton::Right => Some(BUTTONS[1]),
++        MouseButton::Middle => Some(BUTTONS[2]),
++        MouseButton::Back => Some(BUTTONS[3]),
++        MouseButton::Forward => Some(BUTTONS[4]),
++        MouseButton::Other(_) => None,
++    }
+ }
+ 
+-/// Placeholder so `ui::window_manager` type-checks on Linux.
+-pub struct ConnectingWindowsRunner;
++impl ApplicationHandler<UiEvent> for ConnectingWindowsRunner {
++    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
++        if self.surface.is_some() {
++            return;
++        }
++        let attributes = self.attributes.clone();
++        let created = unsafe { GlowHostSurface::create(event_loop, attributes) };
++        let (surface, gl) = match created {
++            Ok(value) => value,
++            Err(error) => {
++                self.fail(event_loop, format!("initialize Linux viewer GL: {error:#}"));
++                return;
++            }
++        };
++        let painter = match egui_glow::Painter::new(Arc::clone(&gl), "", None, true) {
++            Ok(painter) => painter,
++            Err(error) => {
++                self.fail(event_loop, format!("create viewer painter: {error}"));
++                return;
++            }
++        };
++        let context = egui::Context::default();
++        context.set_embed_viewports(true);
++        install_system_cjk_font(&context);
++        configure_viewer_visuals(&context);
++        let input = egui_winit::State::new(
++            context.clone(),
++            egui::ViewportId::ROOT,
++            &surface.window,
++            Some(surface.window.scale_factor() as f32),
++            surface.window.theme(),
++            Some(painter.max_texture_side()),
++        );
++        let mut viewport = egui::ViewportInfo::default();
++        egui_winit::update_viewport_info(&mut viewport, &context, &surface.window, true);
++        let proxy = self.repaint_proxy.clone();
++        let window_id = surface.window.id();
++        let generation = self.ui_generation;
++        context.set_request_repaint_callback(move |info| {
++            if info.viewport_id == egui::ViewportId::ROOT
++                && let Some(when) = Instant::now().checked_add(info.delay)
++            {
++                let _ = proxy.send_event(UiEvent::Repaint(UiRepaintEvent {
++                    window: window_id,
++                    generation,
++                    pass: info.current_cumulative_pass_nr,
++                    when,
++                }));
++            }
++        });
++
++        let progress = self
++            .progress
++            .take()
++            .expect("connecting window is created only once");
++        self.connecting = Some(ConnectionProgressApp::new(self.alias.clone(), progress));
++        if let Some(sender) = self.display_sender.take() {
++            // Software decode path: no D3D11 surface writer on Linux.
++            if sender.send(ViewerDisplayHandle::default()).is_err() {
++                self.close_requested = true;
++                self.exit(event_loop);
++                return;
++            }
++        }
++        self.surface = Some(surface);
++        self.painter = Some(painter);
++        self.context = Some(context);
++        self.input = Some(input);
++        self.viewport = viewport;
++        if let Err(error) = self.render() {
++            self.fail(event_loop, format!("draw first viewer frame: {error:#}"));
++        }
++    }
++
++    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
++        if !self.owns(id) {
++            return;
++        }
++        if let Some(input) = self.input.as_mut()
++            && let Some(surface) = self.surface.as_ref()
++        {
++            let response = input.on_window_event(&surface.window, &event);
++            if response.repaint {
++                self.next_repaint = Some(Instant::now());
++            }
++        }
++
++        match &event {
++            WindowEvent::CloseRequested => {
++                self.close_requested = true;
++            }
++            WindowEvent::Resized(size) if size.width > 0 && size.height > 0 => {
++                if let Some(surface) = &self.surface {
++                    surface.resize(*size);
++                }
++                self.next_repaint = Some(Instant::now());
++            }
++            WindowEvent::RedrawRequested => {
++                if let Err(error) = self.receive_session_events() {
++                    self.fail(event_loop, error.to_string());
++                    return;
++                }
++                if let Err(error) = self.render() {
++                    self.fail(event_loop, error.to_string());
++                    return;
++                }
++            }
++            WindowEvent::CursorMoved { position, .. } => {
++                let pos = egui::pos2(position.x as f32, position.y as f32);
++                // Scale: winit physical → egui points approximately via pixels_per_point.
++                let ppp = self
++                    .context
++                    .as_ref()
++                    .map(|c| c.pixels_per_point())
++                    .unwrap_or(1.0);
++                let pos = egui::pos2(pos.x / ppp, pos.y / ppp);
++                if let Some(video) = self.playing.as_mut() {
++                    video.pointer_in_video = video.video_rect.contains(pos);
++                    if video.pointer_in_video && video.input().mode() != MouseMode::View {
++                        let rect = video.video_rect;
++                        let x = ((pos.x - rect.min.x) / rect.width()).clamp(0.0, 1.0) as f64;
++                        let y = ((pos.y - rect.min.y) / rect.height()).clamp(0.0, 1.0) as f64;
++                        video.input().absolute(video.owner, 0, x, y);
++                        video.last_pos = Some(pos);
++                    }
++                }
++            }
++            WindowEvent::MouseInput { state, button, .. } => {
++                if let Some(video) = self.playing.as_ref()
++                    && video.pointer_in_video
++                    && video.input().mode() != MouseMode::View
++                    && let Some(code) = mouse_button_code(*button)
++                {
++                    video
++                        .input()
++                        .button(video.owner, code, *state == ElementState::Pressed);
++                }
++            }
++            WindowEvent::MouseWheel { delta, .. } => {
++                if let Some(video) = self.playing.as_ref()
++                    && video.pointer_in_video
++                    && video.input().mode() != MouseMode::View
++                {
++                    let (dx, dy) = match delta {
++                        MouseScrollDelta::LineDelta(x, y) => ((*x * 120.0) as i32, (*y * 120.0) as i32),
++                        MouseScrollDelta::PixelDelta(p) => (p.x as i32, p.y as i32),
++                    };
++                    if dx != 0 {
++                        video.input().wheel(video.owner, dx, true);
++                    }
++                    if dy != 0 {
++                        video.input().wheel(video.owner, dy, false);
++                    }
++                }
++            }
++            WindowEvent::ModifiersChanged(modifiers) => {
++                self.modifiers = crate::viewer_shortcuts::modifiers(modifiers.state());
++            }
++            WindowEvent::KeyboardInput { event, .. } => {
++                if let Some(video) = self.playing.as_ref()
++                    && video.input().mode() != MouseMode::View
++                    && let Some(vk) = crate::viewer_shortcuts::physical_key(event.physical_key)
++                {
++                    let down = event.state == ElementState::Pressed;
++                    let _ = video.input().key(video.owner, vk, down, None);
++                    // Also honor local shortcut releases.
++                    if down
++                        && let Some(action) =
++                            crate::viewer_shortcuts::match_key(vk, self.modifiers)
++                    {
++                        match action {
++                            crate::viewer_shortcuts::Action::Close => {
++                                self.close_requested = true;
++                            }
++                            crate::viewer_shortcuts::Action::ReleaseMouse => {
++                                let _ = video
++                                    .session
++                                    .stream_control
++                                    .set_mouse_mode(MouseMode::View);
++                            }
++                            _ => {}
++                        }
++                    }
++                }
++            }
++            _ => {}
++        }
++
++        if self.close_requested {
++            self.exit(event_loop);
++        }
++    }
++
++    fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: UiEvent) {
++        let UiEvent::Repaint(event) = event else {
++            return;
++        };
++        if !self.owns(event.window) {
++            return;
++        }
++        if let Some(context) = &self.context {
++            let current = context.cumulative_pass_nr();
++            if current == event.pass || current == event.pass.saturating_add(1) {
++                self.next_repaint = Some(
++                    self.next_repaint
++                        .map_or(event.when, |old| old.min(event.when)),
++                );
++            }
++        }
++    }
++
++    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
++        if let Err(error) = self.receive_session_events() {
++            self.fail(event_loop, error.to_string());
++            return;
++        }
++        if self.close_requested {
++            self.exit(event_loop);
++            return;
++        }
++        if let Some(when) = self.next_repaint {
++            if when <= Instant::now() {
++                self.next_repaint = None;
++                if let Some(surface) = &self.surface {
++                    surface.window.request_redraw();
++                }
++            }
++            event_loop.set_control_flow(self.next_repaint.map_or_else(
++                || ControlFlow::Wait,
++                ControlFlow::WaitUntil,
++            ));
++        } else {
++            event_loop.set_control_flow(ControlFlow::Wait);
++        }
++    }
++
++    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
++        if let Some(mut video) = self.playing.take() {
++            video.session.frame_wake.install_render_thread(std::thread::current());
++            drop(video);
++        }
++        self.connecting = None;
++        self.input = None;
++        self.context = None;
++        if let Some(mut painter) = self.painter.take() {
++            painter.destroy();
++        }
++        self.surface = None;
++        self.close_requested = true;
++    }
++}
+-- 
+2.47.3
+
