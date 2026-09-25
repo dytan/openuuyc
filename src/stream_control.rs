@@ -270,6 +270,8 @@ pub struct StreamControlSnapshot {
     pub mouse_mode: MouseMode,
     pub mouse_pending: bool,
     pub mouse_error: Option<String>,
+    /// Host reports Winlogon / lock / UAC secure desktop via SystemStateChange.
+    pub secure_desktop: bool,
     pub cursor_pending: bool,
     pub cursor_error: Option<String>,
     pub local_display: LocalDisplayInfo,
@@ -659,6 +661,10 @@ impl StreamControlHandle {
         self.cursor.hidden()
     }
 
+    pub(crate) fn secure_desktop(&self) -> bool {
+        self.cursor.secure_desktop()
+    }
+
     pub(crate) fn remote_cursor_captured(&self) -> bool {
         lock(&self.shared).baseline.cursor_capture
     }
@@ -709,6 +715,7 @@ impl StreamControlHandle {
             mouse_mode: state.mouse.mode(),
             mouse_pending: state.mouse.waiting_for_neutral(),
             mouse_error: state.mouse.error(),
+            secure_desktop: self.cursor.secure_desktop(),
             cursor_pending: state.cursor_pending.is_some(),
             cursor_error: state.cursor_error.clone(),
             local_display: state.local_display,
@@ -1567,7 +1574,9 @@ impl StreamControlHandle {
                 lock(&self.shared).clipboard_files_allowed = files.enabled;
             }
             let was_hidden = self.cursor.hidden();
+            let was_secure = self.cursor.secure_desktop();
             let result = self.cursor.receive(bytes);
+            let now_secure = self.cursor.secure_desktop();
             let mut state = lock(&self.shared);
             if was_hidden
                 && !self.cursor.hidden()
@@ -1576,6 +1585,15 @@ impl StreamControlHandle {
                 && let Some(point) = cursor.sampled_position
             {
                 state.mouse_restore_point = Some((cursor.screen_id, point));
+            }
+            if was_secure != now_secure {
+                // Force a cursor-capture resync for lock ↔ desktop transitions.
+                state.cursor_sync_needed = true;
+                tracing::info!(
+                    secure_desktop = now_secure,
+                    mouse_mode = ?state.mouse.mode(),
+                    "secure desktop transition; refreshing mouse policy"
+                );
             }
             self.refresh_mouse_policy(&mut state);
             drop(state);
@@ -2585,6 +2603,13 @@ fn smart_mouse_requested(state: &StreamControlState) -> bool {
 }
 
 fn mouse_policy(state: &StreamControlState, mode: MouseMode) -> (bool, bool) {
+    // Lock / Winlogon / UAC: absolute coordinates on the captured secure
+    // desktop, with cursor composition so LogonUI remains aimable. Relative
+    // Smart mode (driven by a hidden cursor) is the wrong coordinate space
+    // for password entry — Mac UURemote stays absolute-capable on lock.
+    if state.remote_cursor.secure_desktop() && mode != MouseMode::View {
+        return (false, true);
+    }
     match mode {
         MouseMode::View => (false, true),
         MouseMode::Local => (false, false),

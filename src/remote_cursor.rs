@@ -35,6 +35,8 @@ pub(crate) struct RemoteCursorState(Arc<Mutex<CursorState>>);
 struct CursorState {
     cursor: Option<RemoteCursor>,
     hidden: bool,
+    /// Host SystemStateChange(1).SecureDesktop — Winlogon / lock / UAC.
+    secure_desktop: bool,
 }
 
 impl RemoteCursorState {
@@ -48,6 +50,13 @@ impl RemoteCursorState {
 
     pub fn hidden(&self) -> bool {
         self.0.lock().unwrap_or_else(|p| p.into_inner()).hidden
+    }
+
+    pub fn secure_desktop(&self) -> bool {
+        self.0
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .secure_desktop
     }
 
     pub fn clear(&self) {
@@ -70,31 +79,104 @@ impl RemoteCursorState {
             bytes.len() <= MAX_PNG_BYTES + 1024,
             "cursor state message too large"
         );
-        let state = SystemStateChange::decode(bytes)?;
-        let Some(SystemState::Cursor(shape)) = state.state else {
-            return Ok(());
-        };
-        tracing::trace!(
-            screen = shape.screen_id,
-            kind = shape.cursor_type,
-            width = shape.width,
-            height = shape.height,
-            bytes = shape.byte_value.len(),
-            x = shape.coordinate_x_scale,
-            y = shape.coordinate_y_scale,
-            "remote cursor state"
-        );
-        let hidden = shape.cursor_type == -1;
-        let parsed = parse_shape(shape);
-        match parsed {
-            Ok(cursor) => self.publish(cursor, hidden),
-            Err(error) => {
-                self.clear();
-                return Err(error);
+        let change = SystemStateChange::decode(bytes)?;
+        match change.state {
+            Some(SystemState::SecureDesktop(payload)) => {
+                let active = decode_secure_desktop(&payload);
+                let mut state = self.0.lock().unwrap_or_else(|p| p.into_inner());
+                let changed = state.secure_desktop != active;
+                state.secure_desktop = active;
+                drop(state);
+                tracing::info!(
+                    active,
+                    changed,
+                    payload_bytes = payload.len(),
+                    payload_hex = %hex_prefix(&payload, 32),
+                    "host SystemState SecureDesktop"
+                );
+                Ok(())
             }
+            Some(SystemState::Permission(payload)) => {
+                tracing::info!(
+                    payload_bytes = payload.len(),
+                    payload_hex = %hex_prefix(&payload, 32),
+                    "host SystemState Permission (ignored)"
+                );
+                Ok(())
+            }
+            Some(SystemState::PrivateScreen(payload)) => {
+                tracing::info!(
+                    payload_bytes = payload.len(),
+                    payload_hex = %hex_prefix(&payload, 32),
+                    "host SystemState PrivateScreen (ignored)"
+                );
+                Ok(())
+            }
+            Some(SystemState::Cursor(shape)) => {
+                tracing::trace!(
+                    screen = shape.screen_id,
+                    kind = shape.cursor_type,
+                    width = shape.width,
+                    height = shape.height,
+                    bytes = shape.byte_value.len(),
+                    x = shape.coordinate_x_scale,
+                    y = shape.coordinate_y_scale,
+                    "remote cursor state"
+                );
+                let hidden = shape.cursor_type == -1;
+                let parsed = parse_shape(shape);
+                match parsed {
+                    Ok(cursor) => self.publish(cursor, hidden),
+                    Err(error) => {
+                        self.clear();
+                        return Err(error);
+                    }
+                }
+                Ok(())
+            }
+            Some(other) => {
+                tracing::debug!(
+                    variant = system_state_label(&other),
+                    "host SystemStateChange ignored"
+                );
+                Ok(())
+            }
+            None => Ok(()),
         }
-        Ok(())
     }
+}
+
+fn system_state_label(state: &SystemState) -> &'static str {
+    match state {
+        SystemState::SecureDesktop(_) => "SecureDesktop",
+        SystemState::Cursor(_) => "Cursor",
+        SystemState::Permission(_) => "Permission",
+        SystemState::FileTransfer(_) => "FileTransfer",
+        SystemState::PrivateScreen(_) => "PrivateScreen",
+        SystemState::ClientUiReady(_) => "ClientUiReady",
+    }
+}
+
+fn hex_prefix(bytes: &[u8], max: usize) -> String {
+    bytes
+        .iter()
+        .take(max)
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+/// Nested SecureDesktop body. Official host usually sends `bool enabled = 1`.
+/// Empty payload is treated as active (oneof present ⇒ entered secure desktop).
+fn decode_secure_desktop(payload: &[u8]) -> bool {
+    if payload.is_empty() {
+        return true;
+    }
+    if let Ok(info) = SecureDesktopInfo::decode(payload) {
+        return info.enabled || info.active || info.state != 0;
+    }
+    // Non-empty undecoded body: still treat as secure-desktop signal.
+    true
 }
 
 fn parse_shape(shape: CursorShape) -> Result<Option<RemoteCursor>> {
@@ -142,6 +224,16 @@ fn parse_shape(shape: CursorShape) -> Result<Option<RemoteCursor>> {
         sampled_position,
         screen_id: shape.screen_id,
     }))
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct SecureDesktopInfo {
+    #[prost(bool, tag = "1")]
+    enabled: bool,
+    #[prost(bool, tag = "2")]
+    active: bool,
+    #[prost(int32, tag = "3")]
+    state: i32,
 }
 
 #[derive(Clone, PartialEq, Message)]

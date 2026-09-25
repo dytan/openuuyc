@@ -974,14 +974,37 @@ crate::ui::controls::observe_notice(ui.ctx(), "audio-output-disconnected", "音�
                                     crate::ui::controls::progress_notice(ui.ctx(),"clipboard-wait","剪贴板同步",(!clip.active && snapshot.mouse_mode != MouseMode::View).then_some("等待剪贴板通道就绪"));
 crate::ui::controls::observe_notice(ui.ctx(), "clipboard-error", "剪贴板同步失败", crate::ui::controls::DialogIcon::Error, clip.error.as_deref());
                                 }
+                                if snapshot.secure_desktop {
+                                    ui.label(
+                                        RichText::new("远端处于 Windows 安全桌面（锁屏/UAC）")
+                                            .color(crate::ui::theme::AMBER)
+                                            .size(crate::ui::theme::SMALL),
+                                    );
+                                    ui.label(
+                                        RichText::new("请先发送 Ctrl+Alt+Del，再点击密码框并输入")
+                                            .color(MUTED)
+                                            .size(crate::ui::theme::SMALL),
+                                    );
+                                }
                                 let can_send = snapshot.ready
                                     && !snapshot.mouse_pending
                                     && snapshot.mouse_mode != MouseMode::View
                                     && handle.mouse().keyboard_supported()
                                     && !handle.mouse().waiting_for_neutral();
-                                if menu_row(ui, "发送 Ctrl+Alt+Del", "", None, can_send, false)
+                                if menu_row(
+                                    ui,
+                                    "发送 Ctrl+Alt+Del",
+                                    if snapshot.secure_desktop { "锁屏推荐" } else { "" },
+                                    None,
+                                    can_send,
+                                    snapshot.secure_desktop,
+                                )
                                     .on_hover_text(if can_send {
-                                        "打开远端 Windows 安全选项"
+                                        if snapshot.secure_desktop {
+                                            "向 Winlogon 安全桌面发送 Ctrl+Alt+Del（SAS）"
+                                        } else {
+                                            "打开远端 Windows 安全选项"
+                                        }
                                     } else {
                                         "请先开启 Windows 设备的键鼠控制并松开按键"
                                     })

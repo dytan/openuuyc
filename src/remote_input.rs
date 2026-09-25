@@ -220,6 +220,11 @@ impl RemoteInput {
     }
 
     /// Explicit viewer command, never injected into the local Windows desktop.
+    ///
+    /// Host-side Winlogon expects this chord (often via SendSAS). Keys use the
+    /// same `interrept` flag as physical typing so the controlled agent treats
+    /// the sequence as a real interruptible input stream, matching Mac UURemote
+    /// CAD shortcut behaviour.
     pub fn send_ctrl_alt_del(&self, owner: u64) -> Result<()> {
         let mut s = self.lock();
         if s.keyboard_platform != 1 {
@@ -244,10 +249,15 @@ impl RemoteInput {
                 key,
                 down,
                 lock: None,
-                // A finite menu command has no physical key/heartbeat owner.
-                interrupt: false,
+                interrupt: true,
             });
         }
+        tracing::info!(
+            target: "openuuyc::viewer::input",
+            owner,
+            queue = s.queue.len(),
+            "Ctrl+Alt+Del sequence queued for CONTROL"
+        );
         // next() tracks potentially submitted presses in remote_keys, so
         // cancellation/failure still releases them without replaying Delete.
         drop(s);
