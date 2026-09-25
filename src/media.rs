@@ -172,7 +172,9 @@ impl Default for ConnectionMediaOptions {
 
 /// Prefer software decode on Linux until a native HW path exists.
 pub const fn default_hardware_decode() -> bool {
-    !cfg!(target_os = "linux")
+    // Windows: DXVA11. Linux: VA-API when the driver supports the stream;
+    // DecoderCandidate::available always appends SoftwareH264 as fallback.
+    true
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]

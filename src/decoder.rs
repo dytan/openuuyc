@@ -54,7 +54,14 @@ pub(crate) enum DecodedSurface {
 pub(crate) enum RenderSurface {
     CpuRgba8(Vec<Rgba8>),
 
-    #[cfg(windows)]
+    /// Packed NV12 handed to the renderer as-is; the shader converts it.
+    /// Doing that on the GPU saves a full-frame CPU conversion per picture.
+    #[cfg(not(windows))]
+    CpuNv12 {
+        data: Bytes,
+        color: RenderColor,
+    },
+
     D3D11(windows_surface::D3D11Surface),
 }
 
@@ -75,8 +82,15 @@ impl DecodedSurface {
             Self::CpuI444(data) => {
                 i444_to_rgba_pixels(width, height, &data, color).map(RenderSurface::CpuRgba8)
             }
+            #[cfg(windows)]
             Self::CpuNv12(data) => {
                 nv12_to_rgba_pixels(width, height, &data, color).map(RenderSurface::CpuRgba8)
+            }
+            // The Linux renderer samples NV12 directly; only validate the layout.
+            #[cfg(not(windows))]
+            Self::CpuNv12(data) => {
+                nv12_layout(width, height, &data)?;
+                Ok(RenderSurface::CpuNv12 { data, color })
             }
 
             #[cfg(windows)]
@@ -99,6 +113,9 @@ pub(crate) struct NativeVideoDecoder {
 pub(crate) enum DecoderCandidate {
     #[cfg(windows)]
     WindowsD3d11,
+    /// VA-API through the local driver: NVDEC, Intel or AMD.
+    #[cfg(not(windows))]
+    LinuxVaapi,
 
     SoftwareH264,
 }
@@ -106,11 +123,12 @@ pub(crate) enum DecoderCandidate {
 impl DecoderCandidate {
     pub(crate) fn available(codec: VideoCodec, prefer_hardware: bool) -> Vec<Self> {
         let mut candidates = Vec::new();
-        #[cfg(windows)]
         if prefer_hardware {
+            #[cfg(windows)]
             candidates.push(Self::WindowsD3d11);
+            #[cfg(not(windows))]
+            candidates.push(Self::LinuxVaapi);
         }
-        let _ = prefer_hardware;
 
         if codec == VideoCodec::H264 {
             candidates.push(Self::SoftwareH264);
@@ -241,6 +259,29 @@ impl NativeVideoDecoder {
                     writer,
                     extra_data,
                 )
+            }
+
+            #[cfg(not(windows))]
+            DecoderCandidate::LinuxVaapi => {
+                let config = decoder_config(
+                    codec_kind(codec),
+                    width,
+                    height,
+                    VideoOutputPreference::ZeroCopyGpu,
+                    None,
+                    extra_data,
+                );
+                let decoder = open_platform_decoder(&config)?;
+                Ok(Self {
+                    backend: DecoderBackend::Platform {
+                        decoder: Box::new(decoder),
+                        frame_reader: FrameReader::Cpu,
+                    },
+                    candidate,
+                    label: format!("{} 硬解", platform_label()),
+                    frame_duration,
+                    software_slot: None,
+                })
             }
 
             DecoderCandidate::SoftwareH264 => {
@@ -447,7 +488,7 @@ fn poll_platform_decoder(
 
     #[cfg(target_os = "linux")]
     {
-        use crate::decoder::platform::software::{CpuFormat, DecodedFrame as SoftFrame};
+        use crate::decoder::platform::{CpuFormat, PlatformDecodedFrame as SoftFrame};
         loop {
             let frame = match decoder
                 .poll_owned_frame()
@@ -709,7 +750,7 @@ enum DecoderBackend {
 #[cfg(windows)]
 type PlatformDecoder = crate::decoder::platform::windows::WindowsVideoDecoder;
 #[cfg(target_os = "linux")]
-type PlatformDecoder = crate::decoder::platform::software::SoftwareVideoDecoder;
+type PlatformDecoder = crate::decoder::platform::PlatformVideoDecoder;
 
 fn open_platform_decoder(config: &VideoDecoderConfig) -> Result<PlatformDecoder> {
     PlatformDecoder::open(config).map_err(Into::into)
@@ -718,6 +759,11 @@ fn open_platform_decoder(config: &VideoDecoderConfig) -> Result<PlatformDecoder>
 #[cfg(windows)]
 fn platform_label() -> &'static str {
     "DXVA11"
+}
+
+#[cfg(target_os = "linux")]
+fn platform_label() -> &'static str {
+    "VA-API"
 }
 
 enum FrameReader {

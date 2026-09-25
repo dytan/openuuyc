@@ -31,40 +31,41 @@ mod display_transition;
 
 #[cfg(windows)]
 mod windows_cursor;
+
 #[cfg(windows)]
 mod windows_keyboard;
+
 #[cfg(windows)]
 mod windows_mouse;
+
 #[cfg(windows)]
-pub(crate) mod windows_presenter;
+#[path = "viewer/windows_presenter.rs"]
+pub(crate) mod presenter;
+#[cfg(not(windows))]
+#[path = "viewer/linux_presenter.rs"]
+pub(crate) mod presenter;
+
 #[cfg(windows)]
 mod windows_ui;
 
-#[cfg(target_os = "linux")]
-#[path = "viewer/linux/windows_cursor.rs"]
-mod windows_cursor;
-#[cfg(target_os = "linux")]
-#[path = "viewer/linux/windows_keyboard.rs"]
-mod windows_keyboard;
-#[cfg(target_os = "linux")]
-#[path = "viewer/linux/windows_mouse.rs"]
-mod windows_mouse;
-#[cfg(target_os = "linux")]
-#[path = "viewer/linux/windows_presenter.rs"]
-pub(crate) mod windows_presenter;
-#[cfg(target_os = "linux")]
-#[path = "viewer/linux/windows_ui.rs"]
-mod windows_ui;
-
+/// Windows installs a low-level keyboard hook so system keys reach the remote
+/// desktop. X11 and Wayland deliver keys through the focused window instead.
 pub(crate) struct DesktopInputHook {
+    #[cfg(windows)]
     _hook: windows_keyboard::KeyboardHook,
 }
+#[cfg(windows)]
 pub(crate) fn desktop_input_message(message: *const std::ffi::c_void) -> bool {
     windows_keyboard::message(message) || windows_mouse::router().message(message)
 }
 pub(crate) fn desktop_input_hook() -> Result<DesktopInputHook> {
-    windows_keyboard::remove_unused_raw_keyboard()?;
-    windows_keyboard::KeyboardHook::install().map(|hook| DesktopInputHook { _hook: hook })
+    #[cfg(windows)]
+    {
+        windows_keyboard::remove_unused_raw_keyboard()?;
+        return windows_keyboard::KeyboardHook::install().map(|hook| DesktopInputHook { _hook: hook });
+    }
+    #[cfg(not(windows))]
+    Ok(DesktopInputHook {})
 }
 
 const CONNECTION_PROGRESS_STEPS: u8 = 13;
@@ -142,7 +143,7 @@ pub(crate) fn run_connecting_viewer_window(
     display_sender: oneshot::Sender<ViewerDisplayHandle>,
 ) -> Result<()> {
     {
-        windows_presenter::run_connecting(windows_presenter::ConnectingWindowsRunConfig {
+        presenter::run_connecting(presenter::ConnectingWindowsRunConfig {
             alias,
             progress,
             session,
@@ -719,7 +720,7 @@ impl NativeViewerSession {
     }
 
     pub fn run(self) -> Result<()> {
-        windows_presenter::run(self)
+        presenter::run(self)
     }
 }
 

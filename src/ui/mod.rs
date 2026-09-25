@@ -1,17 +1,20 @@
-//! GUI ownership and shared application controls.
+//! Desktop GUI ownership and shared application controls.
 use anyhow::Result;
 
-#[cfg(windows)]
 pub(crate) mod chrome;
 #[cfg(windows)]
 pub(crate) mod d3d11;
 #[cfg(windows)]
-mod windows;
+mod d3d11_device;
+pub(crate) mod gfx;
+#[cfg(not(windows))]
+mod wgpu_backend;
+#[cfg(not(windows))]
+pub(crate) mod wgpu_video;
 
-#[cfg(target_os = "linux")]
-mod linux;
-
+mod shell;
 pub(crate) mod window_manager;
+
 mod app;
 pub(crate) mod branding;
 pub(crate) mod controls;
@@ -22,12 +25,5 @@ use app::AppSession;
 pub(crate) use app::{App, WindowConfig};
 
 pub(crate) fn run(config: WindowConfig, factory: AppFactory) -> Result<()> {
-    #[cfg(windows)]
-    {
-        return windows::run(config, factory);
-    }
-    #[cfg(target_os = "linux")]
-    {
-        return linux::run(config, factory);
-    }
+    shell::run(config, factory)
 }

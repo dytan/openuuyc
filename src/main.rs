@@ -44,7 +44,7 @@ enum Commands {
         /// 初始视频编码：auto、h264 或 h265
         #[arg(long, default_value = "auto")]
         codec: media::CodecPreference,
-        /// 是否优先使用平台原生硬件解码器（Linux 默认 false：仅有软件 H.264）
+        /// 是否优先使用平台原生硬件解码器（Linux：VA-API，失败则回退软件 H.264）
         #[arg(long, default_value_t = media::default_hardware_decode(), action = clap::ArgAction::Set)]
         hardware_decode: bool,
         /// 传输策略：auto、p2p 或 relay
@@ -87,7 +87,7 @@ enum Commands {
         /// 视频编码：auto、h264 或 h265
         #[arg(long, default_value = "auto")]
         codec: media::CodecPreference,
-        /// 是否优先使用平台原生硬件解码器（Linux 默认 false：仅有软件 H.264）
+        /// 是否优先使用平台原生硬件解码器（Linux：VA-API，失败则回退软件 H.264）
         #[arg(long, default_value_t = media::default_hardware_decode(), action = clap::ArgAction::Set)]
         hardware_decode: bool,
         /// 传输策略：auto、p2p 或 relay
@@ -170,7 +170,7 @@ fn main() -> Result<()> {
             #[cfg(windows)]
             println!("decode backends: Windows Rust DXVA11 / Rust H.264 software");
             #[cfg(target_os = "linux")]
-            println!("decode backends: Linux Rust H.264 software (hardware TODO)");
+            println!("decode backends: Linux VA-API (when available) / Rust H.264 software");
             println!("signal events: {}", signal::KNOWN_EVENTS.join(", "));
             println!(
                 "signal headers: {}, {}, {}",

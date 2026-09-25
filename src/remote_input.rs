@@ -137,6 +137,7 @@ struct State {
     stopping: bool,
     mode: MouseMode,
     relative: bool,
+    relative_denied: bool,
     owner: Option<u64>,
     held: [bool; 5],
     // Marked before handing DOWN to transport. A concurrent stop must release
@@ -329,6 +330,21 @@ impl RemoteInput {
     }
     pub fn relative_mode(&self) -> bool {
         self.lock().relative
+    }
+    pub fn relative_available(&self) -> bool {
+        !self.lock().relative_denied
+    }
+    /// Reported by the window that tried to take the pointer. It stays off for
+    /// the rest of the session: whatever holds the pointer is outside this
+    /// process, and retrying would only swing the mode back and forth.
+    pub fn set_relative_available(&self, available: bool) {
+        let mut s = self.lock();
+        if s.relative_denied != available {
+            return;
+        }
+        s.relative_denied = !available;
+        drop(s);
+        self.repaint();
     }
     pub fn set_relative_mode(&self, relative: bool) {
         let mut s = self.lock();

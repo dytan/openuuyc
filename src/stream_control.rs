@@ -659,6 +659,10 @@ impl StreamControlHandle {
         self.cursor.hidden()
     }
 
+    pub(crate) fn remote_cursor_captured(&self) -> bool {
+        lock(&self.shared).baseline.cursor_capture
+    }
+
     pub fn snapshot(&self) -> StreamControlSnapshot {
         let mut state = lock(&self.shared);
         expire_cursor_request(&mut state);
@@ -1846,6 +1850,7 @@ impl StreamControlHandle {
         let mode = state.mouse.mode();
         let (relative, wanted) = mouse_policy(state, mode);
         if mode == MouseMode::Smart && state.mouse.relative_mode() != relative {
+            let relative = relative && state.mouse.relative_available();
             state.mouse.set_relative_mode(relative);
         }
         if state.cursor_desired_capture != wanted {

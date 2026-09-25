@@ -26,6 +26,6 @@ pub fn acquire() -> Result<Option<Instance>> {
 }
 
 // Windows HWND registration — no-op on Linux.
-pub(crate) fn register_window(_handle: isize) -> Result<()> {
+pub(crate) fn register_window(_window: &winit::window::Window) -> Result<()> {
     Ok(())
 }

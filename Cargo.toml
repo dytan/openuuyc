@@ -103,17 +103,19 @@ windows = { version = "0.62.2", default-features = false, features = [
 
 
 [target.'cfg(target_os = "linux")'.dependencies]
-# Software H.264 path shared with the Windows CPU decoder backend.
 openuuyc-h264 = { path = "src/decoder/h264-core" }
 oxideav-h264 = { version = "=0.1.8" }
-# Thin egui + winit shell for Linux controller UI (no D3D11).
-egui-winit = { version = "0.36.1", default-features = false, features = ["clipboard", "links", "wayland", "x11"] }
-egui_glow = { version = "0.36.1", default-features = false, features = ["winit"] }
-glow = "0.17"
-glutin = { version = "0.32", default-features = false, features = ["egl", "x11", "wayland"] }
-glutin-winit = { version = "0.5", default-features = false, features = ["egl", "x11", "wayland"] }
-raw-window-handle = "0.6"
-winit = { version = "0.30.13", default-features = false, features = ["rwh_06", "x11", "wayland"] }
+cros-libva = { path = "vendor/cros-libva" }
+egui-wgpu = { version = "0.36.1", default-features = false }
+wgpu = { version = "30.0", default-features = false, features = ["vulkan", "gles", "wgsl"] }
+egui-winit = { version = "0.36.1", default-features = false, features = ["clipboard", "links", "x11", "wayland"] }
+winit = { version = "0.30.13", default-features = false, features = ["rwh_06", "x11", "wayland", "wayland-dlopen"] }
+arboard = { version = "3.6.1", default-features = false, features = ["image-data", "wayland-data-control"] }
+libc = "0.2"
+fuser = { version = "0.15", default-features = false }
+x11rb = "0.13"
+pollster = "0.4"
+
 
 [patch.crates-io]
 dtls = { path = "vendor/dtls" }
