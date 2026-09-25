@@ -537,9 +537,8 @@ pub(crate) fn detect_native_decoder_support(
 ) -> Result<DeviceCapability> {
     std::thread::spawn(move || {
         let mut capabilities = Vec::new();
-        #[cfg(windows)]
         if profile.hardware_decode
-            && let Ok(writers) = windows_surface::D3D11SurfaceWriter::available()
+            && let Ok(probe) = hardware_probe()
         {
             for (codec, id) in [(VideoCodec::H264, 1), (VideoCodec::H265, 2)] {
                 if matches!(
@@ -552,16 +551,7 @@ pub(crate) fn detect_native_decoder_support(
                 for chroma in [1, 3] {
                     for depth in [8, 10] {
                         for &(width, height) in QUALITY_DIMENSIONS[1..].iter().rev() {
-                            if writers.iter().any(|writer| {
-                                PlatformDecoder::probe_format(
-                                    writer.device_handle(),
-                                    codec_kind(codec),
-                                    width as u32,
-                                    height as u32,
-                                    depth,
-                                    chroma,
-                                )
-                            }) {
+                            if probe(codec, width as u32, height as u32, depth, chroma) {
                                 capabilities.push(CodecCapability {
                                     video_codec: id,
                                     width,
@@ -577,8 +567,18 @@ pub(crate) fn detect_native_decoder_support(
                 }
             }
         }
-        let _ = profile.hardware_decode;
-        if profile.codec != CodecPreference::H265 {
+        // Linux has no software HEVC. A forced H.265 preference with no VA-API
+        // HEVC would leave the capability list empty and abort connect/reconnect
+        // with "no decoder supports…". Fall back to the H.264 software ceiling
+        // so the host is steered to a codec we can actually play.
+        let force_h265 = profile.codec == CodecPreference::H265;
+        let has_h265 = capabilities.iter().any(|c| c.video_codec == 2);
+        if force_h265 && !has_h265 {
+            tracing::warn!(
+                "本机暂不支持 H.265/HEVC 解码，已回退为 H.264（软件/VA-API）能力通告"
+            );
+        }
+        if !force_h265 || !has_h265 {
             // streamer 958290: this is the advertised software ceiling, not
             // an arbitrary decoder rejection of a larger hardware-fallback AU.
             for chroma_sampling in [1, 3] {
@@ -603,6 +603,38 @@ pub(crate) fn detect_native_decoder_support(
     })
     .join()
     .map_err(|_| anyhow!("native capability probe thread panicked"))?
+}
+
+/// A closure that answers whether the platform decodes a format in hardware.
+/// On Windows every D3D11 device is asked; on Linux the VA-API driver is.
+#[cfg(windows)]
+fn hardware_probe() -> Result<impl Fn(VideoCodec, u32, u32, u8, u8) -> bool> {
+    let writers = windows_surface::D3D11SurfaceWriter::available()?;
+    Ok(move |codec, width, height, depth, chroma| {
+        writers.iter().any(|writer| {
+            PlatformDecoder::probe_format(
+                writer.device_handle(),
+                codec_kind(codec),
+                width,
+                height,
+                depth,
+                chroma,
+            )
+        })
+    })
+}
+
+#[cfg(not(windows))]
+fn hardware_probe() -> Result<impl Fn(VideoCodec, u32, u32, u8, u8) -> bool> {
+    Ok(|codec, width, height, depth, chroma| {
+        crate::decoder::platform::linux::probe_hardware(
+            codec_kind(codec),
+            width,
+            height,
+            depth,
+            chroma,
+        )
+    })
 }
 
 fn decoder_config(

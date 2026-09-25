@@ -158,12 +158,15 @@ impl DualCapability {
                 }
             }
             (Some(row), None) | (None, Some(row)) => row,
-            (None, None) => [h265, h264]
+            (None, None) => [h264, h265]
                 .into_iter()
                 .flatten()
                 .find(|row| row.has_dimensions())
+                // Prefer H.264 when nothing negotiated: Linux has no software
+                // HEVC, and a default of video_codec=2 produced Unsupported
+                // on reconnect when the host still offered H.265.
                 .unwrap_or(FrameQualityCapability {
-                    video_codec: 2,
+                    video_codec: 1,
                     chroma_sampling: 1,
                     bit_depth: 8,
                     max_width: 0,

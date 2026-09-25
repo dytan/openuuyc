@@ -346,6 +346,15 @@ impl DecoderPool {
         {
             self.software_slot = None;
         }
+        // H.265 with no VA-API HEVC (and no software HEVC) leaves every
+        // candidate rejected. Surface a clear fatal instead of a silent Error
+        // loop when the host still offers H.265 after reconnect.
+        if self.blocked_reason.is_none() && self.codec == VideoCodec::H265 {
+            self.blocked_reason = Some(
+                "本机暂不支持当前 H.265/HEVC 码流配置，请在连接设置中改用 H.264 后重连"
+                    .to_owned(),
+            );
+        }
         false
     }
 }
