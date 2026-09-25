@@ -606,6 +606,8 @@ async fn send_remote_input(
                 event.event,
                 crate::remote_input::InputEvent::Button { .. }
                     | crate::remote_input::InputEvent::Key { .. }
+                    | crate::remote_input::InputEvent::Absolute { .. }
+                    | crate::remote_input::InputEvent::Relative { .. }
             ) {
                 let encoded = event.event.encode();
                 let payload = String::from_utf8_lossy(&encoded);
@@ -613,6 +615,7 @@ async fn send_remote_input(
                     target: "openuuyc::viewer::input",
                     kind,
                     %payload,
+                    kcp = kcp.is_negotiated(),
                     "input submitted to CONTROL as text"
                 );
             } else {
@@ -2672,19 +2675,27 @@ impl NativePeer {
         self.data_channels
             .stream_control
             .set_available_video_tracks(indexes);
+        let disable_mix_kcp = std::env::var_os("OPENUUYC_DISABLE_MIX_KCP")
+            .is_some_and(|v| v != "0" && !v.is_empty());
         if let Some(version) = mixed_kcp_version {
-            if let Some(active_version) = self.uu_kcp.negotiated_version() {
+            if disable_mix_kcp {
+                tracing::warn!(
+                    version,
+                    "remote offered mixed-KCP but OPENUUYC_DISABLE_MIX_KCP is set; keeping CONTROL on SCTP"
+                );
+            } else if let Some(active_version) = self.uu_kcp.negotiated_version() {
                 ensure!(
                     active_version == version,
                     "UU mixed-KCP version changed across an ICE restart"
                 );
                 return Ok(());
+            } else {
+                self.uu_kcp.start(
+                    self.connection.sctp(),
+                    version,
+                    self.data_channels.stream_control.clone(),
+                )?;
             }
-            self.uu_kcp.start(
-                self.connection.sctp(),
-                version,
-                self.data_channels.stream_control.clone(),
-            )?;
         }
         // Keep mixed-KCP selected until this peer is closed; a restart
         // omitting the attribute must not silently move CONTROL back to SCTP.
@@ -4176,7 +4187,15 @@ fn apply_uu_application_attributes(sdp: &mut String) -> Result<()> {
         .iter()
         .position(|line| line.starts_with("a=sctp-port:"))
         .map_or(end, |offset| application + 2 + offset);
-    for value in [MAX_MESSAGE_SIZE, MIXED_KCP].into_iter().rev() {
+    let disable_mix_kcp = std::env::var_os("OPENUUYC_DISABLE_MIX_KCP")
+        .is_some_and(|v| v != "0" && !v.is_empty());
+    let app_attrs = if disable_mix_kcp {
+        tracing::warn!("OPENUUYC_DISABLE_MIX_KCP set; omitting x-uuremote-mix-kcp from SDP");
+        [MAX_MESSAGE_SIZE].as_slice()
+    } else {
+        [MAX_MESSAGE_SIZE, MIXED_KCP].as_slice()
+    };
+    for value in app_attrs.iter().copied().rev() {
         if !lines[application + 1..end].iter().any(|line| line == value) {
             lines.insert(insert_at, value.to_owned());
         }
