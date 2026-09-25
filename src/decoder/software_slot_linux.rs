@@ -37,16 +37,14 @@ impl SoftwareSlot {
     }
 
     fn acquire_global() -> Result<Rc<Self>> {
-        let dir = crate::paths::app_data_dir().context("软解互斥目录不可用")?;
-        std::fs::create_dir_all(&dir)?;
-        let path = dir.join("software-video-playback.lock");
+        let path = crate::paths::session_lock_path("software-video-playback");
         let file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
             .open(&path)
-            .context("创建软解互斥锁失败")?;
+            .with_context(|| format!("创建软解互斥锁失败：{}", path.display()))?;
         file.try_lock().map_err(|_| SoftwarePlaybackBusy)?;
         Ok(Rc::new(Self {
             _lock: file,

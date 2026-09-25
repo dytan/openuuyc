@@ -385,6 +385,13 @@ struct StreamControlState {
     features: Option<crate::feature_ability::FeaturePolicy>,
     remote_notice: Option<(Instant, &'static str)>,
     preferred_mouse_mode: MouseMode,
+    /// Take control automatically once the control channel is usable.
+    auto_mouse_control: bool,
+    /// Set when the viewer explicitly gives control back, so an automatic
+    /// hand-over does not fight that choice on the next reconnect.
+    auto_mouse_declined: bool,
+    /// Keeps the "still waiting" diagnostic to one line per session.
+    auto_mouse_reported: bool,
     remote_cursor: crate::remote_cursor::RemoteCursorState,
     peer_mouse_relative: Option<bool>,
     cursor_sync_needed: bool,
@@ -459,6 +466,9 @@ impl StreamControlHandle {
             custom_bitrate_limit: MAX_CUSTOM_BITRATE_MBPS,
             features: None,
             preferred_mouse_mode: MouseMode::Smart,
+            auto_mouse_control: profile.auto_mouse_control,
+            auto_mouse_declined: false,
+            auto_mouse_reported: false,
             remote_notice: None,
             remote_cursor: cursor.clone(),
             peer_mouse_relative: None,
@@ -612,6 +622,7 @@ impl StreamControlHandle {
                     && state.control_channel_open
                     && state.text_channel_open,
             );
+            self.maybe_auto_take_mouse(&mut state);
             self.maybe_send_initial_capture_sync(&mut state);
         }
     }
@@ -1017,29 +1028,75 @@ impl StreamControlHandle {
         Ok(())
     }
 
-    pub fn set_mouse_mode(&self, mode: MouseMode) -> Result<()> {
+        pub fn set_mouse_mode(&self, mode: MouseMode) -> Result<()> {
         let mut state = lock(&self.shared);
-        expire_cursor_request(&mut state);
+        // An explicit choice overrides the automatic hand-over, in both
+        // directions, for the rest of this session.
+        state.auto_mouse_declined = mode == MouseMode::View;
+        let result = self.apply_mouse_mode(&mut state, mode);
+        drop(state);
+        self.mouse.repaint();
+        result
+    }
+
+    fn apply_mouse_mode(&self, state: &mut StreamControlState, mode: MouseMode) -> Result<()> {
+        expire_cursor_request(state);
         state.mouse_restore_point = None;
         if mode == MouseMode::View {
             // Local revocation never waits for remote settings.
             state.mouse.disable();
         } else {
-            ensure_ready(&state)?;
+            ensure_ready(state)?;
             if state.annotation.enabled || state.annotation.toggling() {
                 bail!("请先关闭批注，再开启键鼠控制");
             }
-            let (relative, _) = mouse_policy(&state, mode);
+            let (relative, _) = mouse_policy(state, mode);
             state.mouse.enable(mode, relative)?;
             state.preferred_mouse_mode = mode;
         }
         // Explicit choices may retry uncertain cursor capture; newer intent is
         // independent of an earlier cursor request still awaiting its response.
         state.cursor_sync_needed = true;
-        self.refresh_mouse_policy(&mut state);
-        drop(state);
-        self.mouse.repaint();
+        self.refresh_mouse_policy(state);
         Ok(())
+    }
+
+    /// Hand control over as soon as it is possible, when the viewer asked for
+    /// that in the connection settings and has not taken it back since.
+    fn maybe_auto_take_mouse(&self, state: &mut StreamControlState) {
+        if !state.auto_mouse_control
+            || state.auto_mouse_declined
+            || state.mouse.mode() != MouseMode::View
+        {
+            return;
+        }
+        if !state.viewing_enabled
+            || state.annotation.enabled
+            || state.annotation.toggling()
+            || ensure_ready(state).is_err()
+        {
+            if !state.auto_mouse_reported {
+                state.auto_mouse_reported = true;
+                tracing::debug!(
+                    viewing = state.viewing_enabled,
+                    annotation = state.annotation.enabled,
+                    ready = ensure_ready(state).is_ok(),
+                    "自动键鼠控制等待连接就绪"
+                );
+            }
+            return;
+        }
+        let mode = state.preferred_mouse_mode;
+        let mode = if mode == MouseMode::View {
+            MouseMode::Smart
+        } else {
+            mode
+        };
+        if let Err(error) = self.apply_mouse_mode(state, mode) {
+            tracing::debug!(%error, "自动开启键鼠控制暂不可用");
+        } else {
+            tracing::info!(?mode, "已按连接设置自动开启键鼠控制");
+        }
     }
 
     fn request_cursor_locked(&self, state: &mut StreamControlState, visible: bool) -> Result<i64> {
@@ -1313,6 +1370,9 @@ impl StreamControlHandle {
         let mut state = lock(&self.shared);
         self.drive_display_changes(&mut state);
         expire_cursor_request(&mut state);
+        // Readiness can complete through several paths; checking here means the
+        // hand-over does not depend on which one finished last.
+        self.maybe_auto_take_mouse(&mut state);
         self.refresh_mouse_policy(&mut state);
     }
 
@@ -1371,6 +1431,7 @@ impl StreamControlHandle {
             && state.text_channel_open
         {
             state.mouse.set_ready(state.mouse_transport_connected);
+            self.maybe_auto_take_mouse(&mut state);
         }
         drop(state);
         if !open {
@@ -1552,6 +1613,7 @@ impl StreamControlHandle {
                                     && protocol(&state) == StreamControlProtocol::CaptureSetting,
                             );
                             handshake_changed = true;
+                            self.maybe_auto_take_mouse(&mut state);
                             state.last_error = (protocol(&state)
                                 == StreamControlProtocol::Unsupported)
                                 .then(|| "对端不支持当前串流协议（需要CaptureSetting RPC）".into());

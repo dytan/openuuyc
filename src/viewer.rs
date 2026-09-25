@@ -1739,20 +1739,28 @@ fn system_cjk_font_candidates() -> Vec<(PathBuf, u32)> {
         }
     }
 
-    #[cfg(target_os = "linux")]
+        #[cfg(target_os = "linux")]
     {
-        // Noto Sans CJK Regular.ttc face order: 0=JP 1=KR 2=SC 3=TC 4=HK …
+        // Noto Sans/Serif CJK *.ttc face order: 0=JP 1=KR 2=SC 3=TC 4=HK …
+        // Face index 2 is required for Simplified Chinese; PR1 omitted it.
         const NOTO_SC: u32 = 2;
         for path in [
             "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
             "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/opentype/noto/NotoSerifCJK-Regular.ttc",
             "/usr/share/fonts/truetype/noto-cjk/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
             "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
             "/usr/share/fonts/adobe-source-han-sans/SourceHanSansCN-Regular.otf",
+            "/usr/share/fonts/opentype/source-han-sans/SourceHanSans-Regular.otf",
             "/usr/share/fonts/noto/NotoSansSC-Regular.otf",
+            "/usr/share/fonts/truetype/arphic/uming.ttc",
+            "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
             "/usr/share/fonts/wenquanyi/wqy-microhei/wqy-microhei.ttc",
         ] {
-            let index = if path.ends_with("NotoSansCJK-Regular.ttc") {
+            let index = if path.contains("NotoSansCJK-Regular.ttc")
+                || path.contains("NotoSerifCJK-Regular.ttc")
+            {
                 NOTO_SC
             } else {
                 0
@@ -1760,7 +1768,6 @@ fn system_cjk_font_candidates() -> Vec<(PathBuf, u32)> {
             paths.push((PathBuf::from(path), index));
         }
     }
-
     paths
 }
 

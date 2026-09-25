@@ -35,20 +35,42 @@ pub(super) fn known_folder(id: &windows::core::GUID) -> Option<PathBuf> {
 }
 
 /// Linux home / XDG user directories used by the file browser places list.
+/// Resolve a well-known place via `$XDG_*_DIR`, `~/.config/user-dirs.dirs`, then English defaults.
 #[cfg(target_os = "linux")]
 pub(super) fn linux_place(name: &str) -> Option<PathBuf> {
     let home = std::env::var_os("HOME").map(PathBuf::from)?;
-    let path = match name {
-        "桌面" | "Desktop" => home.join("Desktop"),
-        "下载" | "Downloads" => {
-            std::env::var_os("XDG_DOWNLOAD_DIR")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| home.join("Downloads"))
-        }
-        "文档" | "Documents" => home.join("Documents"),
+    let (env_key, user_dirs_key, default) = match name {
+        "桌面" | "Desktop" => ("XDG_DESKTOP_DIR", "XDG_DESKTOP_DIR", "Desktop"),
+        "下载" | "Downloads" => ("XDG_DOWNLOAD_DIR", "XDG_DOWNLOAD_DIR", "Downloads"),
+        "文档" | "Documents" => ("XDG_DOCUMENTS_DIR", "XDG_DOCUMENTS_DIR", "Documents"),
         _ => return None,
     };
-    path.is_dir().then_some(path)
+    let from_env = std::env::var_os(env_key).map(PathBuf::from);
+    let from_user_dirs = user_dirs_entry(&home, user_dirs_key);
+    from_env
+        .into_iter()
+        .chain(from_user_dirs)
+        .chain(Some(home.join(default)))
+        .find(|path| path.is_dir())
+}
+
+#[cfg(target_os = "linux")]
+fn user_dirs_entry(home: &Path, key: &str) -> Option<PathBuf> {
+    let config = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".config"));
+    let text = std::fs::read_to_string(config.join("user-dirs.dirs")).ok()?;
+    let value = text.lines().rev().find_map(|line| {
+        line.trim()
+            .strip_prefix(key)?
+            .trim_start()
+            .strip_prefix('=')
+            .map(|value| value.trim().trim_matches('"').to_owned())
+    })?;
+    Some(match value.strip_prefix("$HOME/") {
+        Some(relative) => home.join(relative),
+        None => PathBuf::from(value),
+    })
 }
 pub(super) fn safe_relative(name: &str) -> Result<PathBuf> {
     ensure!(

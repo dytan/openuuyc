@@ -52,3 +52,26 @@ pub(crate) fn credential_coord_dir() -> Result<PathBuf> {
         bail!("unsupported platform for credential coordination")
     }
 }
+
+/// Session-scoped advisory lock path (`$XDG_RUNTIME_DIR`, else `/tmp` + uid).
+/// Prefer the runtime dir so locks die with the login session instead of lingering
+/// under the durable XDG data directory.
+#[cfg(target_os = "linux")]
+pub(crate) fn session_lock_path(stem: &str) -> PathBuf {
+    let base = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .filter(|path| path.is_dir())
+        .unwrap_or_else(std::env::temp_dir);
+    let uid = std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|text| {
+            text.lines().find_map(|line| {
+                line.strip_prefix("Uid:")?
+                    .split_whitespace()
+                    .next()
+                    .map(str::to_owned)
+            })
+        })
+        .unwrap_or_else(|| "user".to_owned());
+    base.join(format!("openuuyc-{stem}-{uid}.lock"))
+}
