@@ -464,11 +464,7 @@ fn session_store_lock() -> Result<std::fs::File> {
 }
 
 fn credential_store_lock(filename: &str) -> Result<std::fs::File> {
-    let base = std::env::var_os("LOCALAPPDATA")
-        .map(std::path::PathBuf::from)
-        .context("LOCALAPPDATA is required for session-store coordination")?;
-
-    let directory = base.join("openuuyc");
+    let directory = crate::paths::credential_coord_dir()?;
     std::fs::create_dir_all(&directory).context("create session coordination directory")?;
     let mut options = std::fs::OpenOptions::new();
     options.read(true).write(true).create(true).truncate(false);

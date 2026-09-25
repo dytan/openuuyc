@@ -1,7 +1,7 @@
 //! Device-scoped clipboard RPC with a process-wide Windows/OLE adapter.
 mod formats;
 mod native;
-mod protocol;
+pub(crate) mod protocol;
 use anyhow::{Result, anyhow, bail, ensure};
 use prost::Message;
 use protocol::*;
@@ -66,7 +66,7 @@ pub(crate) struct Snapshot {
     pub active: bool,
     pub error: Option<String>,
 }
-struct Inner {
+pub(crate) struct Inner {
     id: u64,
     enabled: AtomicBool,
     files: AtomicBool,

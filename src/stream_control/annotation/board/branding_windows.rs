@@ -257,7 +257,7 @@ fn rounded_logo() -> Vec<(Path, f32, [u8; 3])> {
     ]
 }
 
-pub(super) fn build(
+pub fn build(
     base: u32,
     screen: i32,
     metrics: Metrics,

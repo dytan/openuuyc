@@ -4,7 +4,7 @@ use super::*;
 pub fn path(id: &str) -> Result<PathBuf> {
     ensure!(super::valid_id(id), "插件 ID 无效");
 
-    let base = PathBuf::from(std::env::var_os("LOCALAPPDATA").context("LOCALAPPDATA unavailable")?)
+    let base = crate::paths::app_data_dir().context("app data directory unavailable")?
         .join("OpenUUYC");
 
     ensure!(base.is_absolute(), "插件配置目录必须为绝对路径");

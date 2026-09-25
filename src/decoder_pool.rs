@@ -283,6 +283,7 @@ impl DecoderPool {
 
             if let Some(format) = format {
                 let supported = match entry.kind {
+                    #[cfg(windows)]
                     DecoderCandidate::WindowsD3d11 => {
                         (format.chroma_format_idc == 1
                             || self.codec == VideoCodec::H265 && format.chroma_format_idc == 3)

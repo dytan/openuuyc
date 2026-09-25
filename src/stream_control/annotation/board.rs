@@ -1,5 +1,10 @@
 //! An opaque Draw stroke below regular ink, scoped to one existing screen.
 use super::*;
+#[cfg(windows)]
+#[path = "board/branding_windows.rs"]
+mod branding;
+#[cfg(target_os = "linux")]
+#[path = "board/branding_linux.rs"]
 mod branding;
 
 const BRUSH_WIDTH: f32 = 64.;
@@ -33,7 +38,7 @@ pub(super) fn complete(a: &mut Annotation) {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-struct Metrics {
+pub(super) struct Metrics {
     width: u32,
     height: u32,
     dpi: u32,

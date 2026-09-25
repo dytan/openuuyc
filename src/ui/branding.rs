@@ -46,6 +46,14 @@ pub(crate) fn window_icon() -> winit::window::Icon {
 }
 
 pub(crate) fn set_taskbar_icon(window: &winit::window::Window) {
-    use winit::platform::windows::WindowExtWindows;
-    window.set_taskbar_icon(Some(window_icon()));
+    #[cfg(windows)]
+    {
+        use winit::platform::windows::WindowExtWindows;
+        window.set_taskbar_icon(Some(window_icon()));
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = window;
+        // TODO(linux): set window icon via winit when available on Wayland/X11.
+    }
 }

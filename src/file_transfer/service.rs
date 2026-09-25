@@ -907,36 +907,64 @@ fn pause_queued(repo: &Repository) -> Result<()> {
 
 pub(super) fn local_list(path: &str) -> Result<Vec<FileEntry>> {
     if path == ":/" {
-        return Ok(('A'..='Z')
-            .filter_map(|c| {
-                let path = format!("{c}:\\");
-                PathBuf::from(&path).is_dir().then(|| FileEntry {
-                    entry_type: 3,
-                    name: path.clone(),
-                    full_path: path,
-                    ..Default::default()
+        #[cfg(windows)]
+        {
+            return Ok(('A'..='Z')
+                .filter_map(|c| {
+                    let path = format!("{c}:\\");
+                    PathBuf::from(&path).is_dir().then(|| FileEntry {
+                        entry_type: 3,
+                        name: path.clone(),
+                        full_path: path,
+                        ..Default::default()
+                    })
                 })
-            })
-            .collect());
+                .collect());
+        }
+        #[cfg(not(windows))]
+        {
+            let home = std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("/"));
+            return Ok(vec![FileEntry {
+                entry_type: 0,
+                name: home.to_string_lossy().into_owned(),
+                full_path: home.to_string_lossy().into_owned(),
+                ..Default::default()
+            }]);
+        }
     }
     let root = storage::canonical_dir(std::path::Path::new(path))?;
     let mut entries = vec![];
     for e in std::fs::read_dir(root)? {
         let e = e?;
         let m = std::fs::symlink_metadata(e.path())?;
+        #[cfg(windows)]
         use std::os::windows::fs::MetadataExt;
-        entries.push(FileEntry {
-            entry_type: if m.is_dir() {
-                if m.file_attributes() & 0x400 != 0 {
-                    2
+        let entry_type = {
+            #[cfg(windows)]
+            {
+                if m.is_dir() {
+                    if m.file_attributes() & 0x400 != 0 { 2 } else { 0 }
+                } else if m.file_attributes() & 0x400 != 0 {
+                    5
                 } else {
-                    0
+                    4
                 }
-            } else if m.file_attributes() & 0x400 != 0 {
-                5
-            } else {
-                4
-            },
+            }
+            #[cfg(not(windows))]
+            {
+                if m.file_type().is_symlink() {
+                    if m.is_dir() { 2 } else { 5 }
+                } else if m.is_dir() {
+                    0
+                } else {
+                    4
+                }
+            }
+        };
+        entries.push(FileEntry {
+            entry_type,
             name: e.file_name().to_string_lossy().into_owned(),
             size: m.len(),
             modified_time: storage::modified(&m),

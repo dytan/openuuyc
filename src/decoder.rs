@@ -46,6 +46,7 @@ pub(crate) enum DecodedSurface {
 
     CpuI444(Bytes),
 
+    #[cfg(windows)]
     D3D11(windows_surface::D3D11Surface),
 }
 
@@ -53,6 +54,7 @@ pub(crate) enum DecodedSurface {
 pub(crate) enum RenderSurface {
     CpuRgba8(Vec<Rgba8>),
 
+    #[cfg(windows)]
     D3D11(windows_surface::D3D11Surface),
 }
 
@@ -77,6 +79,7 @@ impl DecodedSurface {
                 nv12_to_rgba_pixels(width, height, &data, color).map(RenderSurface::CpuRgba8)
             }
 
+            #[cfg(windows)]
             Self::D3D11(surface) => Ok(RenderSurface::D3D11(surface)),
         }
     }
@@ -94,6 +97,7 @@ pub(crate) struct NativeVideoDecoder {
 /// Local implementation choices, never serialized as invented UU decoder IDs.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum DecoderCandidate {
+    #[cfg(windows)]
     WindowsD3d11,
 
     SoftwareH264,
@@ -102,9 +106,11 @@ pub(crate) enum DecoderCandidate {
 impl DecoderCandidate {
     pub(crate) fn available(codec: VideoCodec, prefer_hardware: bool) -> Vec<Self> {
         let mut candidates = Vec::new();
+        #[cfg(windows)]
         if prefer_hardware {
             candidates.push(Self::WindowsD3d11);
         }
+        let _ = prefer_hardware;
 
         if codec == VideoCodec::H264 {
             candidates.push(Self::SoftwareH264);
@@ -201,9 +207,14 @@ impl NativeVideoDecoder {
         }
         let frame_duration = (90_000 / u64::from(frame_rate)).max(1);
         let format = crate::video_format::parse_annex_b_format(codec, &extra_data);
+        #[cfg(windows)]
         let depth = format.map_or(8, |f| f.bit_depth_luma);
+        #[cfg(windows)]
         let chroma = format.map_or(1, |f| f.chroma_format_idc);
+        #[cfg(target_os = "linux")]
+        let _ = format;
         match candidate {
+            #[cfg(windows)]
             DecoderCandidate::WindowsD3d11 => {
                 let supports = |writer: &windows_surface::D3D11SurfaceWriter| {
                     PlatformDecoder::probe_format(
@@ -274,6 +285,7 @@ impl NativeVideoDecoder {
 
     pub(crate) fn surface_writer(&self) -> Option<windows_surface::D3D11SurfaceWriter> {
         match &self.backend {
+            #[cfg(windows)]
             DecoderBackend::Platform {
                 frame_reader: FrameReader::Windows(writer),
                 ..
@@ -282,6 +294,7 @@ impl NativeVideoDecoder {
         }
     }
 
+    #[cfg(windows)]
     fn open_windows_hardware(
         codec: CodecKind,
         width: u32,
@@ -373,58 +386,105 @@ fn poll_platform_decoder(
     frame_reader: &mut FrameReader,
 ) -> DecodedBatch {
     let mut batch = DecodedBatch::default();
+    let _ = frame_reader;
 
-    use crate::decoder::platform::windows::{WindowsCpuFormat, WindowsDecodedFrame};
-    loop {
-        let frame = match decoder
-            .poll_owned_frame()
-            .context("poll owning Windows decoded frame")
-        {
-            Ok(Some(frame)) => frame,
-            Ok(None) => break,
-            Err(error) => {
-                batch
-                    .output_issues
-                    .push(DecoderOutputIssue::Failed { token: None, error });
-                break;
+    #[cfg(windows)]
+    {
+        use crate::decoder::platform::windows::{WindowsCpuFormat, WindowsDecodedFrame};
+        loop {
+            let frame = match decoder
+                .poll_owned_frame()
+                .context("poll owning Windows decoded frame")
+            {
+                Ok(Some(frame)) => frame,
+                Ok(None) => break,
+                Err(error) => {
+                    batch
+                        .output_issues
+                        .push(DecoderOutputIssue::Failed { token: None, error });
+                    break;
+                }
+            };
+            let ready_at = std::time::Instant::now();
+            let (pts, width, height, surface) = match frame {
+                WindowsDecodedFrame::Gpu(frame) => (
+                    frame.pts(),
+                    frame.width(),
+                    frame.height(),
+                    match frame_reader {
+                        FrameReader::Windows(writer) => writer
+                            .wrap_decoded_surface(frame)
+                            .map(DecodedSurface::D3D11),
+                        _ => Err(anyhow!("GPU decoder output has no owning device")),
+                    },
+                ),
+                WindowsDecodedFrame::Cpu(frame) => {
+                    let surface = match frame.format {
+                        WindowsCpuFormat::Nv12 => {
+                            nv12_layout(frame.width, frame.height, &frame.data)
+                                .map(|_| DecodedSurface::CpuNv12(frame.data))
+                        }
+                        WindowsCpuFormat::I444 => Ok(DecodedSurface::CpuI444(frame.data)),
+                    };
+                    (frame.pts, frame.width, frame.height, surface)
+                }
+            };
+            match surface {
+                Ok(surface) => batch.frames.push(DecodedFrame {
+                    pts,
+                    width,
+                    height,
+                    surface,
+                    ready_at,
+                }),
+                Err(error) => batch.output_issues.push(DecoderOutputIssue::Failed {
+                    token: Some(pts),
+                    error,
+                }),
             }
-        };
-        let ready_at = std::time::Instant::now();
-        let (pts, width, height, surface) = match frame {
-            WindowsDecodedFrame::Gpu(frame) => (
-                frame.pts(),
-                frame.width(),
-                frame.height(),
-                match frame_reader {
-                    FrameReader::Windows(writer) => writer
-                        .wrap_decoded_surface(frame)
-                        .map(DecodedSurface::D3D11),
-                    _ => Err(anyhow!("GPU decoder output has no owning device")),
-                },
-            ),
-            WindowsDecodedFrame::Cpu(frame) => {
-                let surface = match frame.format {
-                    WindowsCpuFormat::Nv12 => nv12_layout(frame.width, frame.height, &frame.data)
-                        .map(|_| DecodedSurface::CpuNv12(frame.data)),
-                    WindowsCpuFormat::I444 => Ok(DecodedSurface::CpuI444(frame.data)),
-                };
-                (frame.pts, frame.width, frame.height, surface)
-            }
-        };
-        match surface {
-            Ok(surface) => batch.frames.push(DecodedFrame {
-                pts,
-                width,
-                height,
-                surface,
-                ready_at,
-            }),
-            Err(error) => batch.output_issues.push(DecoderOutputIssue::Failed {
-                token: Some(pts),
-                error,
-            }),
         }
     }
+
+    #[cfg(target_os = "linux")]
+    {
+        use crate::decoder::platform::software::{CpuFormat, DecodedFrame as SoftFrame};
+        loop {
+            let frame = match decoder
+                .poll_owned_frame()
+                .context("poll owning software decoded frame")
+            {
+                Ok(Some(frame)) => frame,
+                Ok(None) => break,
+                Err(error) => {
+                    batch
+                        .output_issues
+                        .push(DecoderOutputIssue::Failed { token: None, error });
+                    break;
+                }
+            };
+            let ready_at = std::time::Instant::now();
+            let SoftFrame::Cpu(frame) = frame;
+            let surface = match frame.format {
+                CpuFormat::Nv12 => nv12_layout(frame.width, frame.height, &frame.data)
+                    .map(|_| DecodedSurface::CpuNv12(frame.data)),
+                CpuFormat::I444 => Ok(DecodedSurface::CpuI444(frame.data)),
+            };
+            match surface {
+                Ok(surface) => batch.frames.push(DecodedFrame {
+                    pts: frame.pts,
+                    width: frame.width,
+                    height: frame.height,
+                    surface,
+                    ready_at,
+                }),
+                Err(error) => batch.output_issues.push(DecoderOutputIssue::Failed {
+                    token: Some(frame.pts),
+                    error,
+                }),
+            }
+        }
+    }
+
     while let Some(token) = decoder.poll_dropped_token() {
         batch.output_issues.push(DecoderOutputIssue::Dropped(token));
     }
@@ -436,6 +496,7 @@ pub(crate) fn detect_native_decoder_support(
 ) -> Result<DeviceCapability> {
     std::thread::spawn(move || {
         let mut capabilities = Vec::new();
+        #[cfg(windows)]
         if profile.hardware_decode
             && let Ok(writers) = windows_surface::D3D11SurfaceWriter::available()
         {
@@ -475,6 +536,7 @@ pub(crate) fn detect_native_decoder_support(
                 }
             }
         }
+        let _ = profile.hardware_decode;
         if profile.codec != CodecPreference::H265 {
             // streamer 958290: this is the advertised software ceiling, not
             // an arbitrary decoder rejection of a larger hardware-fallback AU.
@@ -644,12 +706,16 @@ enum DecoderBackend {
     },
 }
 
+#[cfg(windows)]
 type PlatformDecoder = crate::decoder::platform::windows::WindowsVideoDecoder;
+#[cfg(target_os = "linux")]
+type PlatformDecoder = crate::decoder::platform::software::SoftwareVideoDecoder;
 
 fn open_platform_decoder(config: &VideoDecoderConfig) -> Result<PlatformDecoder> {
     PlatformDecoder::open(config).map_err(Into::into)
 }
 
+#[cfg(windows)]
 fn platform_label() -> &'static str {
     "DXVA11"
 }
@@ -657,5 +723,6 @@ fn platform_label() -> &'static str {
 enum FrameReader {
     Cpu,
 
+    #[cfg(windows)]
     Windows(windows_surface::D3D11SurfaceWriter),
 }

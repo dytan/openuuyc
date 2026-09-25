@@ -29,13 +29,33 @@ use stream_menu::{StreamControlUi, show_stream_control_window};
 mod annotation;
 mod display_transition;
 
+#[cfg(windows)]
 mod windows_cursor;
-
+#[cfg(windows)]
 mod windows_keyboard;
-
+#[cfg(windows)]
 mod windows_mouse;
-
+#[cfg(windows)]
 pub(crate) mod windows_presenter;
+#[cfg(windows)]
+mod windows_ui;
+
+#[cfg(target_os = "linux")]
+#[path = "viewer/linux/windows_cursor.rs"]
+mod windows_cursor;
+#[cfg(target_os = "linux")]
+#[path = "viewer/linux/windows_keyboard.rs"]
+mod windows_keyboard;
+#[cfg(target_os = "linux")]
+#[path = "viewer/linux/windows_mouse.rs"]
+mod windows_mouse;
+#[cfg(target_os = "linux")]
+#[path = "viewer/linux/windows_presenter.rs"]
+pub(crate) mod windows_presenter;
+#[cfg(target_os = "linux")]
+#[path = "viewer/linux/windows_ui.rs"]
+mod windows_ui;
+
 pub(crate) struct DesktopInputHook {
     _hook: windows_keyboard::KeyboardHook,
 }
@@ -46,8 +66,6 @@ pub(crate) fn desktop_input_hook() -> Result<DesktopInputHook> {
     windows_keyboard::remove_unused_raw_keyboard()?;
     windows_keyboard::KeyboardHook::install().map(|hook| DesktopInputHook { _hook: hook })
 }
-
-mod windows_ui;
 
 const CONNECTION_PROGRESS_STEPS: u8 = 13;
 

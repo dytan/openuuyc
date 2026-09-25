@@ -33,9 +33,14 @@ pub(crate) fn open(
             let _enter = runtime.enter();
             let handle = super::service::start(client.clone(), device.clone(), options);
             let previous = handle.snapshot();
+            #[cfg(windows)]
             let home = super::storage::known_folder(&windows::Win32::UI::Shell::FOLDERID_Downloads)
                 .map(|p| p.to_string_lossy().into_owned())
                 .unwrap_or_else(|| ":/".into());
+            #[cfg(target_os = "linux")]
+            let home = super::storage::linux_place("Downloads")
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|| std::env::var("HOME").unwrap_or_else(|_| "/".into()));
             let local = if !previous.local.path.is_empty() {
                 previous.local.path.clone()
             } else if std::path::Path::new(&home).is_dir() {

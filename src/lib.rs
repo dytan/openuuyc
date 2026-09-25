@@ -1,11 +1,11 @@
 //! OpenUUYC: native UU Remote interoperability building blocks.
-
-#[cfg(not(windows))]
-compile_error!("OpenUUYC currently supports Windows only");
+//!
+//! Platform support: Windows (full client), Linux (controller milestone — see `LINUX.md`).
 
 pub const APP_NAME: &str = "OpenUUYC";
 pub(crate) const VIEWER_TITLE_PREFIX: &str = "OpenUUYC — ";
 
+mod paths;
 pub mod api;
 pub mod app;
 pub mod assist;
@@ -36,6 +36,10 @@ pub mod official_receiver;
 mod official_version;
 pub mod performance;
 
+#[cfg(windows)]
+pub mod plugins;
+#[cfg(target_os = "linux")]
+#[path = "plugins_linux.rs"]
 pub mod plugins;
 mod port_mapping;
 mod power;

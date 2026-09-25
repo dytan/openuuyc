@@ -118,6 +118,7 @@ fn read_command(mut command: Command) -> Option<String> {
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
 
+    #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         command.creation_flags(0x08000000);
@@ -149,8 +150,10 @@ fn hardware() -> Vec<(String, String)> {
     )];
 
     {
+        #[cfg(windows)]
+        {
         let mut command = Command::new("powershell.exe");
-        command.args(["-NoProfile", "-NonInteractive", "-Command", "[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); $ErrorActionPreference='Stop'; $os = Get-CimInstance Win32_OperatingSystem; $cpu = Get-ItemProperty -LiteralPath 'HKLM:\\HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0'; @{os=($os.Caption + ' ' + $os.Version);cpu=$cpu.ProcessorNameString;memory=[math]::Round($os.TotalVisibleMemorySize / 1MB, 1)} | ConvertTo-Json -Compress"]);
+        command.args(["-NoProfile", "-NonInteractive", "-Command", r#"[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); $ErrorActionPreference='Stop'; $os = Get-CimInstance Win32_OperatingSystem; $cpu = Get-ItemProperty -LiteralPath 'HKLM:\HARDWARE\DESCRIPTION\System\CentralProcessor\0'; @{os=($os.Caption + ' ' + $os.Version);cpu=$cpu.ProcessorNameString;memory=[math]::Round($os.TotalVisibleMemorySize / 1MB, 1)} | ConvertTo-Json -Compress"#]);
         if let Some(text) = read_command(command).and_then(|s| {
             serde_json::from_str::<serde_json::Value>(s.trim_start_matches('\u{feff}')).ok()
         }) {
@@ -164,6 +167,37 @@ fn hardware() -> Vec<(String, String)> {
             }
         } else {
             rows.push(("硬件信息".into(), "系统查询失败或超时".into()));
+        }
+        }
+        #[cfg(target_os = "linux")]
+        {
+            if let Ok(os) = std::fs::read_to_string("/etc/os-release") {
+                if let Some(pretty) = os.lines().find_map(|l| l.strip_prefix("PRETTY_NAME=")) {
+                    rows.push(("操作系统".into(), pretty.trim_matches('"').to_owned()));
+                }
+            }
+            if let Ok(cpu) = std::fs::read_to_string("/proc/cpuinfo") {
+                if let Some(model) = cpu.lines().find_map(|l| {
+                    l.strip_prefix("model name\t: ")
+                        .or_else(|| l.strip_prefix("model name: "))
+                }) {
+                    rows.push(("处理器".into(), model.trim().into()));
+                }
+            }
+            if let Ok(mem) = std::fs::read_to_string("/proc/meminfo") {
+                if let Some(kb) = mem.lines().find_map(|l| l.strip_prefix("MemTotal:")) {
+                    if let Some(num) = kb
+                        .split_whitespace()
+                        .next()
+                        .and_then(|s| s.parse::<f64>().ok())
+                    {
+                        rows.push((
+                            "物理内存".into(),
+                            format!("{:.1} GiB", num / 1024.0 / 1024.0),
+                        ));
+                    }
+                }
+            }
         }
     }
 

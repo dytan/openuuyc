@@ -101,6 +101,20 @@ windows = { version = "0.62.2", default-features = false, features = [
     "Win32_UI_WindowsAndMessaging",
 ] }
 
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Software H.264 path shared with the Windows CPU decoder backend.
+openuuyc-h264 = { path = "src/decoder/h264-core" }
+oxideav-h264 = { version = "=0.1.8" }
+# Thin egui + winit shell for Linux controller UI (no D3D11).
+egui-winit = { version = "0.36.1", default-features = false, features = ["clipboard", "links", "wayland", "x11"] }
+egui_glow = { version = "0.36.1", default-features = false }
+glow = "0.16"
+glutin = { version = "0.32", default-features = false, features = ["egl", "x11", "wayland"] }
+glutin-winit = { version = "0.5", default-features = false, features = ["egl", "x11", "wayland"] }
+raw-window-handle = "0.6"
+winit = { version = "0.30.13", default-features = false, features = ["rwh_06", "x11", "wayland"] }
+
 [patch.crates-io]
 dtls = { path = "vendor/dtls" }
 interceptor = { path = "vendor/interceptor" }

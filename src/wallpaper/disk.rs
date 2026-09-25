@@ -18,7 +18,7 @@ const MAX_IMAGE_BYTES: u64 = 4 * 1024 * 1024;
 static IO: Mutex<()> = Mutex::new(());
 
 pub(super) fn path(device: &str, url: &str) -> Option<PathBuf> {
-    let root = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
+    let root = crate::paths::app_data_dir().ok();
 
     let root = root.filter(|p| p.is_absolute())?;
     let mut hash = Sha256::new();
