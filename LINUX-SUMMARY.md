@@ -33,6 +33,7 @@ b12086a feat(linux): initial controller compile path for native Linux
 
 - arboard text/image path
 - FUSE file offer (`clipboard/fuse_linux.rs`) + X11 offer helper from DoyoDia PR1
+- `clipboard_files` connection default + center UI/CLI (PR1 parity); see `docs/linux-clipboard-fuse.md`
 
 ## Still open
 

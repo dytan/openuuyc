@@ -155,6 +155,11 @@ pub struct ConnectionMediaOptions {
     /// Take keyboard and mouse control as soon as the control channel is ready,
     /// instead of waiting for the player's 键鼠控制 button.
     pub auto_mouse_control: bool,
+    /// Offer and accept files through the clipboard. Off by default: a copy
+    /// reaches for whatever it names, so it carries more than a paste of text
+    /// or a picture does, and the player's 文件复制 switch turns it on per
+    /// session.
+    pub clipboard_files: bool,
 }
 
 impl Default for ConnectionMediaOptions {
@@ -166,6 +171,7 @@ impl Default for ConnectionMediaOptions {
             hardware_decode: default_hardware_decode(),
             transport: TransportChoice::Auto,
             auto_mouse_control: true,
+            clipboard_files: false,
         }
     }
 }
@@ -186,6 +192,7 @@ pub(crate) struct ConnectionMediaProfile {
     pub codec: CodecPreference,
     pub hardware_decode: bool,
     pub auto_mouse_control: bool,
+    pub clipboard_files: bool,
 }
 
 impl ConnectionMediaOptions {
@@ -199,6 +206,7 @@ impl ConnectionMediaOptions {
             codec: self.codec,
             hardware_decode: self.hardware_decode,
             auto_mouse_control: self.auto_mouse_control,
+            clipboard_files: self.clipboard_files,
         })
     }
 }

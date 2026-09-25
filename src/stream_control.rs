@@ -381,6 +381,9 @@ struct PendingCapturePreferences {
 struct StreamControlState {
     peer_clipboard: i32,
     clipboard_files_allowed: bool,
+    /// Last reported value of the clipboard gate, so the diagnostic only fires
+    /// when it changes.
+    clipboard_ready_reported: bool,
     remote_upgrade: Option<crate::remote_upgrade::RemoteUpgrade>,
     annotation: annotation::Annotation,
     custom_bitrate_limit: u32,
@@ -466,6 +469,7 @@ impl StreamControlHandle {
         let state = StreamControlState {
             peer_clipboard: 0,
             clipboard_files_allowed: true,
+            clipboard_ready_reported: false,
             remote_upgrade: None,
             annotation: Default::default(),
             custom_bitrate_limit: MAX_CUSTOM_BITRATE_MBPS,
@@ -565,10 +569,14 @@ impl StreamControlHandle {
             volume: 100,
             muted: profile.muted,
         });
+        let clipboard = crate::clipboard::Clipboard::new();
+        // The connection setting decides where the per-session 文件复制 switch
+        // starts; the player can still turn it on or off afterwards.
+        clipboard.set_files(profile.clipboard_files);
         (
             Self {
                 microphone: crate::microphone::Microphone::new(),
-                clipboard: crate::clipboard::Clipboard::new(),
+                clipboard,
                 files: Arc::new(crate::file_transfer::Transport::default()),
                 mouse,
                 cursor,
@@ -1933,14 +1941,32 @@ impl StreamControlHandle {
         {
             self.disable_microphone_locked(state);
         }
+        let clipboard_ready = state.viewing_enabled
+            && state.pb_connected
+            && state.control_channel_open
+            && state.text_channel_open
+            && state.mouse_transport_connected
+            && state.peer_clipboard >= 1
+            && state.mouse.mode() != MouseMode::View;
+        // Clipboard sync is gated on seven separate conditions, and a session
+        // that never syncs looks identical whichever one is missing.
+        if clipboard_ready != state.clipboard_ready_reported {
+            state.clipboard_ready_reported = clipboard_ready;
+            tracing::debug!(
+                ready = clipboard_ready,
+                viewing = state.viewing_enabled,
+                pb = state.pb_connected,
+                control = state.control_channel_open,
+                text = state.text_channel_open,
+                mouse_transport = state.mouse_transport_connected,
+                peer = state.peer_clipboard,
+                mode = ?state.mouse.mode(),
+                files_allowed = state.clipboard_files_allowed,
+                "剪贴板同步条件"
+            );
+        }
         self.clipboard.policy(
-            state.viewing_enabled
-                && state.pb_connected
-                && state.control_channel_open
-                && state.text_channel_open
-                && state.mouse_transport_connected
-                && state.peer_clipboard >= 1
-                && state.mouse.mode() != MouseMode::View,
+            clipboard_ready,
             state.peer_clipboard >= 2 && state.clipboard_files_allowed,
         );
         if !state.viewing_enabled {

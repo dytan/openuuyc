@@ -12,7 +12,7 @@ PR1 tip: `eb51212` at `/home/di/src/openuuyc-pr1`.
 | GUI shell | **egui-wgpu** + winit (Vulkan/GLES) | egui-wgpu + winit |
 | Video present | wgpu (`ui/wgpu_video.rs`); NV12 or RGBA | same family |
 | Decode | VA-API via vendored `cros-libva` + software H.264 fallback | same |
-| Clipboard | arboard + FUSE file offer + X11 offer | same |
+| Clipboard | arboard + FUSE file offer + X11 offer + `clipboard_files` connect default | same |
 | Instance lock | `$XDG_RUNTIME_DIR` flock | `$XDG_RUNTIME_DIR` flock |
 | Fonts | CJK candidates **with TTC face index 2** for SC | broader paths, **no** face index |
 
