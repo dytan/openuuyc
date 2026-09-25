@@ -53,6 +53,8 @@ not a fork product. Windows cfg paths stay intact.
 - [`LINUX-BUILD.md`](LINUX-BUILD.md) — distro build guides
 - [`LINUX-SUMMARY.md`](LINUX-SUMMARY.md) — handoff / commit list
 - [`PR1-COMPARE.md`](PR1-COMPARE.md) — OUR tree vs DoyoDia linux-port
+- [`docs/linux-clipboard-fuse.md`](docs/linux-clipboard-fuse.md) — FUSE/clipboard audit + verify
+- [`docs/linux-lock-video-freeze.md`](docs/linux-lock-video-freeze.md) — lock UI freeze postmortem (f0067ff)
 
 ## Auth note
 
