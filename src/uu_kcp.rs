@@ -32,6 +32,7 @@ const MAX_RECENT_PACKETS: usize = 4_096;
 const FEC_RETENTION: Duration = Duration::from_millis(1_000);
 const RECOVERY_INFO_INTERVAL: Duration = Duration::from_millis(500);
 const FEC_NETWORK_UPDATE_INTERVAL: Duration = Duration::from_millis(1_000);
+const TEXT_MESSAGE: u16 = 0;
 const BINARY_MESSAGE: u16 = 1;
 const CONTROL_SEND_WINDOW: u16 = 256;
 
@@ -63,6 +64,8 @@ enum WorkerCommand {
     Send {
         stream_id: u16,
         payload: Vec<u8>,
+        /// WebRTC DataChannel PPI: 0 = string/text (JSON HID), 1 = binary (protobuf).
+        message_type: u16,
         guard: Option<SendGuard>,
         release: bool,
         result: oneshot::Sender<std::result::Result<usize, String>>,
@@ -165,7 +168,8 @@ impl UuKcpControl {
     }
 
     pub(crate) async fn send(&self, stream_id: u16, payload: Vec<u8>) -> Result<usize> {
-        self.send_inner(stream_id, payload, None, false).await
+        self.send_inner(stream_id, payload, BINARY_MESSAGE, None, false)
+            .await
     }
     pub(crate) async fn send_input(
         &self,
@@ -174,13 +178,16 @@ impl UuKcpControl {
         guard: SendGuard,
         release: bool,
     ) -> Result<usize> {
-        self.send_inner(stream_id, payload, Some(guard), release)
+        // Mouse/keyboard JSON mirrors WebRTC string DataChannel messages.
+        // Protobuf ECHO/CaptureSetting stay on BINARY_MESSAGE via send().
+        self.send_inner(stream_id, payload, TEXT_MESSAGE, Some(guard), release)
             .await
     }
     async fn send_inner(
         &self,
         stream_id: u16,
         payload: Vec<u8>,
+        message_type: u16,
         guard: Option<SendGuard>,
         release: bool,
     ) -> Result<usize> {
@@ -197,6 +204,7 @@ impl UuKcpControl {
             .send(WorkerCommand::Send {
                 stream_id,
                 payload,
+                message_type,
                 guard,
                 release,
                 result: result_tx,
@@ -341,6 +349,7 @@ async fn run_worker(
         if let Some(WorkerCommand::Send {
             stream_id,
             payload,
+            message_type,
             guard,
             release,
             result,
@@ -360,12 +369,13 @@ async fn run_worker(
                 pending = Some(WorkerCommand::Send {
                     stream_id,
                     payload,
+                    message_type,
                     guard,
                     release,
                     result,
                 });
             } else {
-                let outcome = match worker.send_message(stream_id, &payload) {
+                let outcome = match worker.send_message(stream_id, &payload, message_type) {
                     Ok(bytes) => worker.flush_output(&endpoint).await.map(|()| bytes),
                     Err(error) => Err(error),
                 };
@@ -398,11 +408,16 @@ impl Worker {
         self.epoch.elapsed().as_millis() as u32
     }
 
-    fn send_message(&mut self, stream_id: u16, payload: &[u8]) -> Result<usize> {
+    fn send_message(
+        &mut self,
+        stream_id: u16,
+        payload: &[u8],
+        message_type: u16,
+    ) -> Result<usize> {
         let mut message = Vec::with_capacity(payload.len() + 4);
         message.extend_from_slice(payload);
         message.extend_from_slice(&stream_id.to_le_bytes());
-        message.extend_from_slice(&BINARY_MESSAGE.to_le_bytes());
+        message.extend_from_slice(&message_type.to_le_bytes());
         let bytes = self
             .kcp
             .send(&message)
@@ -685,6 +700,15 @@ impl Worker {
                     stream_id,
                     message_type,
                     "ignoring non-CONTROL mixed-KCP stream"
+                );
+                continue;
+            }
+            // String/text PPI carries JSON HID; only binary is protobuf.
+            if message_type == TEXT_MESSAGE {
+                tracing::trace!(
+                    stream_id,
+                    bytes = message.len(),
+                    "ignoring CONTROL text message on mixed-KCP (controller has no HID ingress)"
                 );
                 continue;
             }

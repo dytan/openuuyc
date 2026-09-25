@@ -190,6 +190,15 @@ impl RemoteInput {
         self.lock().waiting_for_neutral
     }
 
+    pub fn transport_ready(&self) -> bool {
+        let s = self.lock();
+        s.ready && !s.stopping
+    }
+
+    pub fn keyboard_platform_code(&self) -> i32 {
+        self.lock().keyboard_platform
+    }
+
     /// A native input adapter confirms that both keyboard and mouse are up.
     /// A delayed callback from another activation cannot reopen input.
     pub fn confirm_neutral(&self, generation: u64) {
@@ -526,6 +535,15 @@ impl RemoteInput {
 
     fn claim(s: &mut State, owner: u64) -> bool {
         if !s.ready || s.stopping || s.mode == MouseMode::View || s.waiting_for_neutral {
+            tracing::debug!(
+                target: "openuuyc::viewer::input",
+                ready = s.ready,
+                stopping = s.stopping,
+                mode = ?s.mode,
+                waiting_for_neutral = s.waiting_for_neutral,
+                owner,
+                "remote input claim rejected"
+            );
             return false;
         }
         if s.owner != Some(owner) {
@@ -547,6 +565,16 @@ impl RemoteInput {
     }
 
     pub fn absolute(&self, owner: u64, screen: i32, x: f64, y: f64) {
+        self.absolute_inner(owner, screen, x, y, false);
+    }
+
+    /// Absolute move used when relative mode is desired but the viewer has not
+    /// secured an exclusive pointer grab yet (or the desktop refused one).
+    pub fn absolute_without_relative_gate(&self, owner: u64, screen: i32, x: f64, y: f64) {
+        self.absolute_inner(owner, screen, x, y, true);
+    }
+
+    fn absolute_inner(&self, owner: u64, screen: i32, x: f64, y: f64, allow_during_relative: bool) {
         if screen < 0
             || !x.is_finite()
             || !y.is_finite()
@@ -556,7 +584,7 @@ impl RemoteInput {
             return;
         }
         let mut s = self.lock();
-        if s.relative || !Self::claim(&mut s, owner) {
+        if (s.relative && !allow_during_relative) || !Self::claim(&mut s, owner) {
             return;
         }
         if let Some(InputEvent::Absolute {
@@ -630,7 +658,14 @@ impl RemoteInput {
         // Do not collapse rapid DOWN/UP transitions to a frame's final state.
         if Self::push(&mut s, InputEvent::Button { button, down }) {
             s.held[index] = down;
-            tracing::trace!(button, down, "mouse button edge queued");
+            tracing::info!(
+                target: "openuuyc::viewer::input",
+                button,
+                down,
+                owner,
+                queue = s.queue.len(),
+                "mouse button edge queued"
+            );
         }
         drop(s);
         self.wake.notify_one();

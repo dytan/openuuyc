@@ -564,8 +564,20 @@ async fn send_remote_input(
                 async {
                     let state=mouse.clone();let guarded=event.clone();
                     let release=matches!(event.event,crate::remote_input::InputEvent::Button{down:false,..}|crate::remote_input::InputEvent::Key{down:false,..}|crate::remote_input::InputEvent::AssistButton{down:false,..});
-                    if kcp.is_negotiated(){kcp.send_input(channel.id(),event.event.encode(),Arc::new(move||state.is_current(&guarded)),release).await}
-                    else {send_control_message(&kcp,&channel,event.event.encode()).await}
+                    let payload = event.event.encode();
+                    // JSON HID must be a WebRTC *string* message (KCP TEXT_MESSAGE /
+                    // DataChannel send_text). Protobuf stays binary via send_control_message.
+                    if kcp.is_negotiated() {
+                        kcp.send_input(
+                            channel.id(),
+                            payload,
+                            Arc::new(move || state.is_current(&guarded)),
+                            release,
+                        )
+                        .await
+                    } else {
+                        send_control_text(&channel, payload).await
+                    }
                 }) => result
                 .map_err(|_| anyhow::anyhow!("鼠标输入发送超时"))
                 .and_then(|result| result.map(|_| ())),
@@ -575,12 +587,42 @@ async fn send_remote_input(
         {
             tracing::warn!(target: "openuuyc::rtc::input", %error, "mouse input transport failed");
         }
-        if !keyboard_submission_seen
-            && result.is_ok()
-            && matches!(event.event, crate::remote_input::InputEvent::Key { .. })
-        {
-            keyboard_submission_seen = true;
-            tracing::debug!(target: "openuuyc::rtc::input", "keyboard event submitted to CONTROL transport");
+        if result.is_ok() {
+            let kind = match &event.event {
+                crate::remote_input::InputEvent::Absolute { .. } => "absolute",
+                crate::remote_input::InputEvent::Relative { .. } => "relative",
+                crate::remote_input::InputEvent::Button { down, .. } => {
+                    if *down { "button_down" } else { "button_up" }
+                }
+                crate::remote_input::InputEvent::Key { down, .. } => {
+                    if *down { "key_down" } else { "key_up" }
+                }
+                crate::remote_input::InputEvent::Wheel { .. } => "wheel",
+                crate::remote_input::InputEvent::Heartbeat => "heartbeat",
+                crate::remote_input::InputEvent::Correction { .. } => "correction",
+                crate::remote_input::InputEvent::AssistButton { .. } => "assist",
+            };
+            if matches!(
+                event.event,
+                crate::remote_input::InputEvent::Button { .. }
+                    | crate::remote_input::InputEvent::Key { .. }
+            ) {
+                let encoded = event.event.encode();
+                let payload = String::from_utf8_lossy(&encoded);
+                tracing::info!(
+                    target: "openuuyc::viewer::input",
+                    kind,
+                    %payload,
+                    "input submitted to CONTROL as text"
+                );
+            } else {
+                tracing::debug!(target: "openuuyc::viewer::input", kind, "input submitted to CONTROL as text");
+            }
+            if !keyboard_submission_seen
+                && matches!(event.event, crate::remote_input::InputEvent::Key { .. })
+            {
+                keyboard_submission_seen = true;
+            }
         }
         mouse.complete(&event, result);
     }
@@ -603,6 +645,18 @@ async fn send_control_message(
             .await
             .map_err(anyhow::Error::from)
     }
+}
+
+/// JSON mouse/keyboard HID on the CONTROL channel as a WebRTC string message.
+async fn send_control_text(control_channel: &RTCDataChannel, payload: Vec<u8>) -> Result<usize> {
+    ensure!(
+        control_channel.ready_state() == RTCDataChannelState::Open,
+        "UU CONTROL data channel is not open"
+    );
+    control_channel
+        .send_text_bytes(&Bytes::from(payload))
+        .await
+        .map_err(anyhow::Error::from)
 }
 
 async fn send_official_streamer_statistics(

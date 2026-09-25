@@ -1015,7 +1015,8 @@ impl Player {
         };
         {
             let input = self.input();
-            if !input.relative_mode()
+            if !self.pointer_locked
+                || !input.relative_mode()
                 || input.mode() == MouseMode::View
                 || input.waiting_for_neutral()
             {
@@ -1044,26 +1045,36 @@ impl Player {
             return;
         }
         if wanted {
-            // X11 only confines; Wayland and Windows can lock in place.
-            let locked = window
-                .set_cursor_grab(winit::window::CursorGrabMode::Locked)
-                .or_else(|_| window.set_cursor_grab(winit::window::CursorGrabMode::Confined));
-            match locked {
+            // Relative motion on Wayland only arrives while the pointer is
+            // Locked. Confined keeps CursorMoved alive but blocks absolute()
+            // once relative_mode is set — a silent dead zone on Hyprland/Sway.
+            // Require Locked; anything less falls back to absolute coordinates.
+            match window.set_cursor_grab(winit::window::CursorGrabMode::Locked) {
                 Ok(()) => {
                     window.set_cursor_visible(false);
                     self.pointer_locked = true;
                 }
                 Err(error) => {
                     tracing::warn!(%error, "无法锁定指针，改用绝对坐标");
-                    // Without the pointer the deltas would drift; the session
-                    // falls back to absolute positioning on its next poll.
-                    self.input().set_relative_available(false);
-                    self.control_error = Some("当前桌面不允许锁定指针，已改用绝对坐标".to_owned());
+                    self.deny_relative("当前桌面不允许锁定指针，已改用绝对坐标");
                 }
             }
         } else {
             let _ = window.set_cursor_grab(winit::window::CursorGrabMode::None);
             window.set_cursor_visible(true);
+            self.pointer_locked = false;
+            self.motion_remainder = [0.0, 0.0];
+        }
+    }
+
+    /// Relative mode without an exclusive grab drifts; force absolute now, not
+    /// on the next policy refresh (which may be a long time away).
+    fn deny_relative(&mut self, message: &str) {
+        self.input().set_relative_available(false);
+        self.input().set_relative_mode(false);
+        self.control_error = Some(message.to_owned());
+        if self.pointer_locked {
+            // Caller releases the grab when wanted flips; keep state coherent.
             self.pointer_locked = false;
             self.motion_remainder = [0.0, 0.0];
         }
@@ -1132,7 +1143,11 @@ impl Player {
                     self.run_shortcut(action, window);
                     return true;
                 }
-                if consumed_by_ui || self.input().mode() == MouseMode::View {
+                // Caption buttons leave egui focus behind; that must not swallow
+                // every key destined for the remote Windows desktop. Only a real
+                // text field should keep keyboard events local.
+                let ui_owns_keys = context.text_edit_focused();
+                if ui_owns_keys || self.input().mode() == MouseMode::View {
                     return false;
                 }
                 let Some(key) = crate::viewer_shortcuts::physical_key(event.physical_key) else {
@@ -1167,24 +1182,41 @@ impl Player {
                     }
                     self.confirm_neutral();
                 }
-                tracing::debug!(target: "openuuyc::viewer::input",
+                tracing::info!(target: "openuuyc::viewer::input",
                     ?button, pressed = *state == ElementState::Pressed,
                     consumed_by_ui, in_video = self.pointer_in_video,
                     mode = ?self.input().mode(),
                     relative = self.input().relative_mode(),
                     neutral_wait = self.input().waiting_for_neutral(),
+                    ready = self.input().transport_ready(),
+                    platform = self.input().keyboard_platform_code(),
+                    owner = self.owner,
                     "mouse button");
-                if consumed_by_ui || self.input().mode() == MouseMode::View {
+                // Over the picture, forward clicks even when egui reports the
+                // event as consumed (hovering a previously focused caption
+                // control). Still yield while egui is mid-drag on a widget.
+                let ui_drag = context.egui_is_using_pointer();
+                if self.input().mode() == MouseMode::View {
                     return false;
                 }
-                if !self.pointer_in_video && *state == ElementState::Pressed {
+                if (consumed_by_ui && (ui_drag || !self.pointer_in_video))
+                    || (!self.pointer_in_video && *state == ElementState::Pressed)
+                {
                     return false;
                 }
                 let Some(code) = mouse_button(*button) else {
                     return false;
                 };
-                self.input()
-                    .button(self.owner, code, *state == ElementState::Pressed);
+                let pressed = *state == ElementState::Pressed;
+                self.input().button(self.owner, code, pressed);
+                tracing::info!(
+                    target: "openuuyc::viewer::input",
+                    code,
+                    pressed,
+                    ready = self.input().transport_ready(),
+                    mode = ?self.input().mode(),
+                    "mouse button forwarded to RemoteInput"
+                );
                 true
             }
             WindowEvent::MouseWheel { delta, .. } => {
@@ -1293,6 +1325,11 @@ impl Player {
         if input.mode() == MouseMode::View || input.waiting_for_neutral() {
             return;
         }
+        // Relative mode owns motion only while the pointer is actually locked.
+        // Without the grab, absolute() would be dropped and the cursor freezes.
+        if input.relative_mode() && self.pointer_locked {
+            return;
+        }
         let dragging = input.owner_holds_buttons(self.owner);
         if !dragging && !self.pointer_in_video {
             return;
@@ -1318,7 +1355,26 @@ impl Player {
             .min(1.0 - 1.0 / f64::from(remote_width.max(1)));
         let y = (local_y.clamp(0.0, height - 1.0) / height)
             .min(1.0 - 1.0 / f64::from(remote_height.max(1)));
-        input.absolute(self.owner, screen, x, y);
+        let relative_unlocked = input.relative_mode() && !self.pointer_locked;
+        if relative_unlocked {
+            input.absolute_without_relative_gate(self.owner, screen, x, y);
+        } else {
+            input.absolute(self.owner, screen, x, y);
+        }
+        if self.diagnose(3) {
+            tracing::debug!(
+                target: "openuuyc::viewer::input",
+                screen,
+                abs_x = x,
+                abs_y = y,
+                remote_width,
+                remote_height,
+                rect = ?rect,
+                local_x,
+                local_y,
+                "absolute mapped inside letterboxed video_rect"
+            );
+        }
     }
 
     fn scale_factor(&self) -> f32 {
