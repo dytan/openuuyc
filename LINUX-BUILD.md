@@ -1,7 +1,7 @@
 # Building OpenUUYC on Linux
 
-Tested host: **Omarchy 4.x** (Arch-based) on XPS, `rustc 1.98.1`.
-Package lists below are grounded in what this host has installed; Debian/Fedora
+Tested on a Linux workstation running **Arch Linux**, `rustc 1.98.1`.
+Package lists below are grounded in a working Arch install; Debian/Fedora
 names are the usual equivalents and should be verified on first build.
 
 ## Rust
@@ -14,7 +14,7 @@ rustc --version   # known good: 1.98.1
 
 ## System packages
 
-### Arch / Omarchy (verified on this host)
+### Arch Linux (verified)
 
 ```bash
 sudo pacman -S --needed \
@@ -66,7 +66,7 @@ sudo dnf install \
 
 - **bindgen / cros-libva** needs `clang` + `libclang` and `pkg-config` able to
   find `libva`.
-- **winit / egui-wgpu** need X11 and/or Wayland client libs; Omarchy/Hyprland
+- **winit / egui-wgpu** need X11 and/or Wayland client libs; Arch/Hyprland
   users typically have both.
 - **FUSE clipboard files** need `fuse3` (users in the `fuse` group / user_allow_other
   per distro policy if mounts fail).

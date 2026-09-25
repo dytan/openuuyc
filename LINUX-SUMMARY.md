@@ -1,6 +1,6 @@
 # Linux controller — handoff summary
 
-Date: 2026-09-25 (Asia/Shanghai). Host: Omarchy on XPS. **Do not push** until
+Date: 2026-09-25 (Asia/Shanghai). Tested on a Linux workstation. **Do not push** until
 the collab path is agreed.
 
 ## Commits ahead of `origin/main`
@@ -44,7 +44,7 @@ b12086a feat(linux): initial controller compile path for native Linux
 ## How to continue
 
 ```bash
-cd /home/di/src/openuuyc
+cd /path/to/your/Linux/checkout   # the Linux controller tree
 cargo build
 pkill -x OpenUUYC || true
 ./target/debug/OpenUUYC gui --codec h264 --hardware-decode true --transport auto --auto-mouse-control true &

@@ -179,7 +179,7 @@ fn hex_prefix(bytes: &[u8], max: usize) -> String {
         .join("")
 }
 
-/// Nested SecureDesktop body observed from DESKTOP-0MDRDMA lock:
+/// Nested SecureDesktop body observed from a Windows host lock screen:
 /// `enabled=1` (field 1), session/station often -1 (fields 3/4), flags/state 1 (5/6).
 /// Empty payload is treated as active (oneof present ⇒ entered secure desktop).
 fn decode_secure_desktop_info(payload: &[u8]) -> SecureDesktopDecoded {

@@ -7,4 +7,4 @@ Primary docs moved to:
 - [`LINUX-SUMMARY.md`](LINUX-SUMMARY.md) — handoff / commits
 - [`PR1-COMPARE.md`](PR1-COMPARE.md) — OUR vs DoyoDia PR1
 
-Authoritative tree: `/home/di/src/openuuyc` on the Omarchy XPS host.
+Work from your Linux checkout of this tree (the Linux controller tree).

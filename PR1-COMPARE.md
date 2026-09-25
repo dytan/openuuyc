@@ -2,8 +2,8 @@
 
 Date: 2026-09-25 (Asia/Shanghai), post wgpu/VA-API/clipboard integration.
 
-OUR tip: local `main` on `/home/di/src/openuuyc` (see `git log origin/main..HEAD`).
-PR1 tip: `eb51212` at `/home/di/src/openuuyc-pr1`.
+OUR tip: local `main` on your Linux checkout (see `git log origin/main..HEAD`).
+PR1 tip: `eb51212` in a sibling checkout of the DoyoDia linux-port branch.
 
 ## Architecture (current)
 
