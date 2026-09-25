@@ -1696,36 +1696,68 @@ fn format_optional_ms(value: Option<f64>) -> String {
 
 pub(crate) fn install_system_cjk_font(ctx: &egui::Context) {
     let candidates = system_cjk_font_candidates();
-    let Some((path, bytes)) = candidates
-        .into_iter()
-        .find_map(|path| std::fs::read(&path).ok().map(|bytes| (path, bytes)))
-    else {
+    let Some((path, index, bytes)) = candidates.into_iter().find_map(|(path, index)| {
+        std::fs::read(&path)
+            .ok()
+            .map(|bytes| (path, index, bytes))
+    }) else {
         tracing::warn!("no system CJK font found; non-Latin labels may be unavailable");
         return;
     };
     let mut fonts = egui::FontDefinitions::default();
     let name = "system-cjk".to_owned();
+    let mut data = egui::FontData::from_owned(bytes);
+    data.index = index;
     fonts
         .font_data
-        .insert(name.clone(), Arc::new(egui::FontData::from_owned(bytes)));
+        .insert(name.clone(), Arc::new(data));
     for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+        // Fallback after the default Latin fonts so CJK glyphs resolve from system fonts.
         fonts.families.entry(family).or_default().push(name.clone());
     }
     ctx.set_fonts(fonts);
     ctx.request_repaint();
-    tracing::debug!(path = %path.display(), "installed system CJK font for native viewer");
+    tracing::debug!(
+        path = %path.display(),
+        index,
+        "installed system CJK font for native viewer"
+    );
 }
 
-fn system_cjk_font_candidates() -> Vec<PathBuf> {
+/// `(path, face_index)` — face index matters for `.ttc` collections (e.g. Noto Sans CJK SC = 2).
+fn system_cjk_font_candidates() -> Vec<(PathBuf, u32)> {
     let mut paths = Vec::new();
 
+    #[cfg(windows)]
     {
         let fonts = std::env::var_os("WINDIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(r"C:\Windows"))
             .join("Fonts");
         for name in ["msyh.ttc", "msyhbd.ttc", "simhei.ttf", "simsun.ttc"] {
-            paths.push(fonts.join(name));
+            paths.push((fonts.join(name), 0));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        // Noto Sans CJK Regular.ttc face order: 0=JP 1=KR 2=SC 3=TC 4=HK …
+        const NOTO_SC: u32 = 2;
+        for path in [
+            "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/truetype/noto-cjk/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/adobe-source-han-sans/SourceHanSansCN-Regular.otf",
+            "/usr/share/fonts/noto/NotoSansSC-Regular.otf",
+            "/usr/share/fonts/wenquanyi/wqy-microhei/wqy-microhei.ttc",
+        ] {
+            let index = if path.ends_with("NotoSansCJK-Regular.ttc") {
+                NOTO_SC
+            } else {
+                0
+            };
+            paths.push((PathBuf::from(path), index));
         }
     }
 
