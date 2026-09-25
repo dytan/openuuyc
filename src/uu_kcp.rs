@@ -178,9 +178,17 @@ impl UuKcpControl {
         guard: SendGuard,
         release: bool,
     ) -> Result<usize> {
-        // Mouse/keyboard JSON mirrors WebRTC string DataChannel messages.
-        // Protobuf ECHO/CaptureSetting stay on BINARY_MESSAGE via send().
-        self.send_inner(stream_id, payload, TEXT_MESSAGE, Some(guard), release)
+        // Origin/Windows client tags HID JSON as BINARY on mixed-KCP (same as
+        // protobuf). TEXT was an experiment that the host ignored on both KCP
+        // and SCTP; keep OPENUUYC_HID_AS_TEXT=1 as an escape hatch.
+        let message_type = if std::env::var_os("OPENUUYC_HID_AS_TEXT")
+            .is_some_and(|v| v != "0" && !v.is_empty())
+        {
+            TEXT_MESSAGE
+        } else {
+            BINARY_MESSAGE
+        };
+        self.send_inner(stream_id, payload, message_type, Some(guard), release)
             .await
     }
     async fn send_inner(

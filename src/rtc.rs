@@ -565,8 +565,11 @@ async fn send_remote_input(
                     let state=mouse.clone();let guarded=event.clone();
                     let release=matches!(event.event,crate::remote_input::InputEvent::Button{down:false,..}|crate::remote_input::InputEvent::Key{down:false,..}|crate::remote_input::InputEvent::AssistButton{down:false,..});
                     let payload = event.event.encode();
-                    // JSON HID must be a WebRTC *string* message (KCP TEXT_MESSAGE /
-                    // DataChannel send_text). Protobuf stays binary via send_control_message.
+                    // Match origin/Windows: HID JSON is a *binary* DataChannel /
+                    // mixed-KCP BINARY message. OPENUUYC_HID_AS_TEXT=1 forces the
+                    // prior text experiment on both paths.
+                    let as_text = std::env::var_os("OPENUUYC_HID_AS_TEXT")
+                        .is_some_and(|v| v != "0" && !v.is_empty());
                     if kcp.is_negotiated() {
                         kcp.send_input(
                             channel.id(),
@@ -575,8 +578,10 @@ async fn send_remote_input(
                             release,
                         )
                         .await
-                    } else {
+                    } else if as_text {
                         send_control_text(&channel, payload).await
+                    } else {
+                        send_control_message(&kcp, &channel, payload).await
                     }
                 }) => result
                 .map_err(|_| anyhow::anyhow!("鼠标输入发送超时"))
@@ -616,10 +621,10 @@ async fn send_remote_input(
                     kind,
                     %payload,
                     kcp = kcp.is_negotiated(),
-                    "input submitted to CONTROL as text"
+                    "input submitted to CONTROL"
                 );
             } else {
-                tracing::debug!(target: "openuuyc::viewer::input", kind, "input submitted to CONTROL as text");
+                tracing::debug!(target: "openuuyc::viewer::input", kind, "input submitted to CONTROL");
             }
             if !keyboard_submission_seen
                 && matches!(event.event, crate::remote_input::InputEvent::Key { .. })
