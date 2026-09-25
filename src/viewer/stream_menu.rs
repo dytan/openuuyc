@@ -981,7 +981,7 @@ crate::ui::controls::observe_notice(ui.ctx(), "clipboard-error", "剪贴板同�
                                             .size(crate::ui::theme::SMALL),
                                     );
                                     ui.label(
-                                        RichText::new("请先发送 Ctrl+Alt+Del，再点击密码框并输入")
+                                        RichText::new("已自动发送 Ctrl+Alt+Del；若仍无输入可再点下方手动发送")
                                             .color(MUTED)
                                             .size(crate::ui::theme::SMALL),
                                     );

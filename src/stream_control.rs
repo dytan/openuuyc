@@ -394,6 +394,9 @@ struct StreamControlState {
     auto_mouse_declined: bool,
     /// Keeps the "still waiting" diagnostic to one line per session.
     auto_mouse_reported: bool,
+    /// One auto-CAD + QuerySystemState per SecureDesktop entry (lock/UAC).
+    secure_desktop_cad_sent: bool,
+    secure_desktop_query_sent: bool,
     remote_cursor: crate::remote_cursor::RemoteCursorState,
     peer_mouse_relative: Option<bool>,
     cursor_sync_needed: bool,
@@ -471,6 +474,8 @@ impl StreamControlHandle {
             auto_mouse_control: profile.auto_mouse_control,
             auto_mouse_declined: false,
             auto_mouse_reported: false,
+            secure_desktop_cad_sent: false,
+            secure_desktop_query_sent: false,
             remote_notice: None,
             remote_cursor: cursor.clone(),
             peer_mouse_relative: None,
@@ -605,6 +610,9 @@ impl StreamControlHandle {
             state.cursor_sync_needed = false;
             state.cursor_desired_capture = true;
             state.mouse_restore_point = None;
+            state.secure_desktop_cad_sent = false;
+            state.secure_desktop_query_sent = false;
+            self.cursor.clear();
             // Reconnect always starts in View, even after a failed mode change.
             state.baseline.cursor_capture = true;
             state.initial_capture_sync_sent = false;
@@ -1110,6 +1118,70 @@ impl StreamControlHandle {
         }
     }
 
+    /// On Winlogon/lock SecureDesktop: poll QuerySystemState once and queue a
+    /// single Ctrl+Alt+Del (SAS) so host injection can reach LogonUI. efc4e3b
+    /// soak proved absolute+keys reached CONTROL while CAD was never sent and
+    /// typing stayed dead. Opt out with OPENUUYC_NO_AUTO_CAD=1.
+    fn maybe_secure_desktop_assist(&self, state: &mut StreamControlState) {
+        if !self.cursor.secure_desktop() {
+            return;
+        }
+        if !state.secure_desktop_query_sent && ensure_ready(state).is_ok() {
+            let sequence = state.next_sequence;
+            state.next_sequence = state.next_sequence.wrapping_add(1);
+            let payload = encode_envelope(sequence, PbPayload::QuerySystemState(Vec::new()));
+            if self
+                .outgoing
+                .send(OutgoingControlMessage {
+                    annotation_generation: None,
+                    sequence,
+                    payload,
+                    protocol: protocol(state),
+                    completion: None,
+                })
+                .is_ok()
+            {
+                state.secure_desktop_query_sent = true;
+                tracing::info!(
+                    sequence,
+                    "SecureDesktop: sent QuerySystemState for Permission/state ACK"
+                );
+            }
+        }
+        if state.secure_desktop_cad_sent {
+            return;
+        }
+        if std::env::var_os("OPENUUYC_NO_AUTO_CAD")
+            .is_some_and(|v| v != "0" && !v.is_empty())
+        {
+            return;
+        }
+        if state.mouse.mode() == MouseMode::View
+            || !state.mouse.keyboard_supported()
+            || state.mouse.waiting_for_neutral()
+        {
+            return;
+        }
+        match state
+            .mouse
+            .send_ctrl_alt_del(SECURE_DESKTOP_CAD_OWNER)
+        {
+            Ok(()) => {
+                state.secure_desktop_cad_sent = true;
+                tracing::info!(
+                    target: "openuuyc::viewer::input",
+                    "SecureDesktop: auto Ctrl+Alt+Del (SAS) queued for lock/UAC HID"
+                );
+            }
+            Err(error) => {
+                tracing::debug!(
+                    %error,
+                    "SecureDesktop: auto CAD deferred (waiting for mouse ready)"
+                );
+            }
+        }
+    }
+
     fn request_cursor_locked(&self, state: &mut StreamControlState, visible: bool) -> Result<i64> {
         expire_cursor_request(state);
         ensure_ready(state)?;
@@ -1385,6 +1457,7 @@ impl StreamControlHandle {
         // hand-over does not depend on which one finished last.
         self.maybe_auto_take_mouse(&mut state);
         self.refresh_mouse_policy(&mut state);
+        self.maybe_secure_desktop_assist(&mut state);
     }
 
     pub(crate) fn set_data_channel_open(&self, label: &str, open: bool) {
@@ -1589,6 +1662,13 @@ impl StreamControlHandle {
             if was_secure != now_secure {
                 // Force a cursor-capture resync for lock ↔ desktop transitions.
                 state.cursor_sync_needed = true;
+                if now_secure {
+                    state.secure_desktop_cad_sent = false;
+                    state.secure_desktop_query_sent = false;
+                } else {
+                    state.secure_desktop_cad_sent = false;
+                    state.secure_desktop_query_sent = false;
+                }
                 tracing::info!(
                     secure_desktop = now_secure,
                     mouse_mode = ?state.mouse.mode(),
@@ -1596,6 +1676,7 @@ impl StreamControlHandle {
                 );
             }
             self.refresh_mouse_policy(&mut state);
+            self.maybe_secure_desktop_assist(&mut state);
             drop(state);
             self.mouse.repaint();
             return result;
@@ -2710,6 +2791,16 @@ fn encode_envelope(sequence: i64, payload: PbPayload) -> Vec<u8> {
     };
     message.encode_to_vec()
 }
+
+/// Wrap HID JSON in `PbPayload::InputEvent` for a protobuf CONTROL dual-path.
+/// Origin clients send raw JSON on the data channel; some hosts may only honor
+/// the protobuf oneof on SecureDesktop. Callers keep the JSON primary path.
+pub(crate) fn encode_hid_input_event(json: Vec<u8>) -> Vec<u8> {
+    encode_envelope(0, PbPayload::InputEvent(json))
+}
+
+/// Synthetic owner for auto CAD on SecureDesktop (not a window HWND).
+const SECURE_DESKTOP_CAD_OWNER: u64 = 0x5EC_00CAD;
 
 fn fps_to_protobuf(fps: u32) -> i32 {
     match fps {
