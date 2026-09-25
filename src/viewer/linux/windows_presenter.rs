@@ -233,7 +233,9 @@ impl VideoState {
             sender_total: frame.sender_timing.sending_delay,
             transport: frame.sender_timing.transport_delay,
         });
-        self.session.frame_wake.notify();
+        // Wake the decode worker after draining the presentation queue
+        // (same contract as Windows Video Render / linux_presenter).
+        self.session.manager_wake.unpark();
     }
 }
 

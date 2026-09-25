@@ -687,6 +687,13 @@ impl Player {
             self.session.performance.record_dropped_present_frame();
             frame = newer;
         }
+        drop(queue);
+        // Windows Video Render unparks manager_wake after every dequeue.
+        // DECODER_ADMISSION_TOKENS=1: the decode worker parks while the
+        // presentation queue is non-empty. Without this unpark, Linux keeps
+        // showing the first frame forever (lock UI clock/dots freeze) even
+        // though RTP/FEC keep arriving — exactly the SecureDesktop soak.
+        self.session.manager_wake.unpark();
         Some(frame)
     }
 
