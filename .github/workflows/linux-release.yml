@@ -1,0 +1,142 @@
+# Build a portable-ish Linux x86_64 controller binary.
+# - workflow_dispatch: upload Actions artifacts only (no GitHub Release)
+# - push tag v*: create a GitHub Release with the tarball + checksum
+#
+# Runtime still needs distro libs (libva + GPU drivers, fuse3, Vulkan/Mesa,
+# ALSA). See packaging/linux/INSTALL.txt inside the tarball.
+name: Linux release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: linux-x86_64 (ubuntu-22.04)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config clang libclang-dev \
+            libssl-dev \
+            libxkbcommon-dev libx11-dev libxi-dev libxcursor-dev libxrandr-dev libxss-dev \
+            libwayland-dev wayland-protocols \
+            libgl1-mesa-dev libvulkan-dev \
+            libva-dev \
+            libfuse3-dev \
+            libasound2-dev \
+            libdbus-1-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: linux-release
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Resolve version
+        id: ver
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" == v* ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Resolved version: ${VERSION}"
+
+      - name: Package tarball
+        id: pkg
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          NAME="OpenUUYC-linux-x86_64-${VERSION}"
+          STAGE="dist/${NAME}"
+          mkdir -p "${STAGE}"
+          install -m 755 target/release/OpenUUYC "${STAGE}/OpenUUYC"
+          install -m 644 packaging/linux/INSTALL.txt "${STAGE}/INSTALL.txt"
+          # Short README slice for operators who only grab the release asset.
+          {
+            echo "# OpenUUYC Linux controller ${VERSION}"
+            echo
+            echo "Binary built from https://github.com/${GITHUB_REPOSITORY}"
+            echo "Commit: ${GITHUB_SHA}"
+            echo
+            echo "See INSTALL.txt for runtime dependencies and how to run."
+            echo "Full docs: README.md / LINUX.md / LINUX-BUILD.md in the repo."
+          } > "${STAGE}/README.txt"
+          mkdir -p dist
+          tar -C dist -czf "dist/${NAME}.tar.gz" "${NAME}"
+          (cd dist && sha256sum "${NAME}.tar.gz" > "${NAME}.tar.gz.sha256")
+          echo "name=${NAME}" >> "$GITHUB_OUTPUT"
+          echo "tarball=dist/${NAME}.tar.gz" >> "$GITHUB_OUTPUT"
+          echo "checksum=dist/${NAME}.tar.gz.sha256" >> "$GITHUB_OUTPUT"
+          ls -lh "dist/${NAME}.tar.gz" "dist/${NAME}.tar.gz.sha256"
+          cat "dist/${NAME}.tar.gz.sha256"
+
+      - name: Upload Actions artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.pkg.outputs.name }}
+          path: |
+            ${{ steps.pkg.outputs.tarball }}
+            ${{ steps.pkg.outputs.checksum }}
+          if-no-files-found: error
+
+      - name: Publish GitHub Release (tags only)
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.ver.outputs.version }}
+          TARBALL: ${{ steps.pkg.outputs.tarball }}
+          CHECKSUM: ${{ steps.pkg.outputs.checksum }}
+          NAME: ${{ steps.pkg.outputs.name }}
+        run: |
+          set -euo pipefail
+          NOTES="$(mktemp)"
+          {
+            echo "## OpenUUYC Linux controller ${VERSION}"
+            echo
+            echo "Prebuilt **x86_64 glibc** controller binary (built on Ubuntu 22.04)."
+            echo
+            echo "### Artifact"
+            echo "- \`${NAME}.tar.gz\` — \`OpenUUYC\` binary + \`INSTALL.txt\`"
+            echo "- \`${NAME}.tar.gz.sha256\` — SHA-256 checksum"
+            echo
+            echo "### Install"
+            echo '```bash'
+            echo "tar -xzf ${NAME}.tar.gz"
+            echo "cd ${NAME}"
+            echo "# install runtime packages (see INSTALL.txt), then:"
+            echo "./OpenUUYC gui"
+            echo '```'
+            echo
+            echo "You do **not** need Rust or a local compile on each machine if you use"
+            echo "this release on a compatible x86_64 glibc distro. You **do** still need"
+            echo "runtime libraries: **libva** (+ GPU VA-API drivers), **fuse3**,"
+            echo "Vulkan/Mesa (or GLES), ALSA, and a desktop session with Secret Service."
+            echo
+            echo "VA-API hardware decode uses the **machine's** libva drivers at runtime;"
+            echo "CI cannot ship GPU drivers."
+            echo
+            echo "To publish: tag matching Cargo.toml, e.g. \`git tag v${VERSION} && git push <remote> v${VERSION}\`."
+            echo
+            echo "Source / build-from-source: see \`LINUX-BUILD.md\`."
+          } > "${NOTES}"
+          gh release create "${GITHUB_REF_NAME}"             "${TARBALL}" "${CHECKSUM}"             --title "OpenUUYC ${VERSION} (Linux x86_64)"             --notes-file "${NOTES}"

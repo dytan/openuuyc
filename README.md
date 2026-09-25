@@ -9,7 +9,7 @@ This repository ([dytan/openuuyc](https://github.com/dytan/openuuyc)) is a colla
 ## 下载与使用 / Downloads
 
 - **Windows**: download the x64 client from upstream [Releases](https://github.com/djkcyl/openuuyc/releases), run it, sign in (QR or SMS), then connect. The remote device must be running UU Remote.
-- **Linux**: build from source (see [Linux controller](#linux-controller-this-fork) below). There is no packaged Linux release yet.
+- **Linux (this fork)**: prefer a prebuilt controller from this repo's [Releases](https://github.com/dytan/openuuyc/releases) when available (`OpenUUYC-linux-x86_64-<version>.tar.gz`). Extract, install runtime packages (see `INSTALL.txt` in the archive), then `./OpenUUYC gui`. You do **not** need to compile on each machine for the same arch/glibc; you still need runtime libs (libva + GPU drivers, fuse3, Vulkan/Mesa, ALSA). Or [build from source](#build-linux) below.
 
 ## 功能 / Features (upstream)
 
@@ -43,6 +43,14 @@ Deeper status and postmortems (do not duplicate here):
 - [`docs/linux-clipboard-fuse.md`](docs/linux-clipboard-fuse.md) — FUSE / clipboard verify
 - [`docs/linux-lock-video-freeze.md`](docs/linux-lock-video-freeze.md) — lock-screen freeze fix
 
+### Prebuilt vs build-from-source
+
+| Goal | What to do |
+|------|------------|
+| Run the controller | Download a [Release](https://github.com/dytan/openuuyc/releases) tarball (x86_64 glibc). No Rust required. |
+| Contribute / hack | `cargo build` on the machine (needs Rust + build deps). Debug binaries are not portable across distros. |
+| Publish a release | Push tag `v*` matching `Cargo.toml` version to this fork; Actions builds `OpenUUYC-linux-x86_64-<version>.tar.gz`. Or run workflow **Linux release** via `workflow_dispatch` for artifacts only. |
+
 ### Build (Linux)
 
 Needs Rust stable and a C/C++ toolchain, plus X11/Wayland, Vulkan/Mesa, **libva**, **fuse3**, and CJK fonts. Distro-specific package lists: [`LINUX-BUILD.md`](LINUX-BUILD.md).
@@ -53,6 +61,8 @@ cd openuuyc
 cargo build                 # debug → target/debug/OpenUUYC
 cargo build --release       # release → target/release/OpenUUYC
 ```
+
+CI release builds use Ubuntu 22.04 (see [`.github/workflows/linux-release.yml`](.github/workflows/linux-release.yml)). VA-API still needs **local** libva drivers at runtime; the CI binary does not embed GPU drivers.
 
 ### Run (Linux)
 

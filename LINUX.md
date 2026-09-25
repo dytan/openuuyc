@@ -24,6 +24,31 @@ not a fork product. Windows cfg paths stay intact.
 - **HEVC Main10 / 4:4:4** readback (Main 8-bit NV12 is wired; Main10 needs a non-NV12 path)
 - Broader Wayland compositor quirks soak
 - Plugin host parity with Windows
+- FUSE clipboard: no `AutoUnmount` (needs `AllowOther`); Wayland file-offer polish beyond arboard + X11 helper
+- Annotation board branding strokes (GDI path stubbed on Linux)
+- HDR display probe (Wayland color-management / DRM)
+- Global hotkey / richer shortcut naming vs Windows hooks
+- Window icon on some Wayland compositors
+
+### Windows-ok / Linux gap (controller)
+
+| Feature | Linux status |
+|---------|--------------|
+| Host / agent (本机被控) | **N/A** — Linux is controller-only by design |
+| Audio playback (remote → local) | Works (cpal / ALSA) |
+| Microphone (local → remote) | Works (cpal; soak may vary by device) |
+| File transfer (dual-pane) | Works (XDG places); some Windows ACL/path checks are cfg-gated |
+| Clipboard text/image | Works (arboard) |
+| Clipboard files | **Partial** — FUSE offer; no AutoUnmount; Wayland polish TBD |
+| HW decode | **Partial** — VA-API H.264 + HEVC Main; Main10 missing; no dmabuf zero-copy (vs DXVA) |
+| Plugins / node graph | **Missing** — stub host |
+| Annotation branding | **Partial** — board works; GDI brand strokes empty |
+| Multi-monitor select | Works (protocol/UI); compositor chrome polish differs |
+| Remote upgrade (official on target) | Works (API; target is Windows agent) |
+| Presence / “host room” online | Present for account presence; controllable/host agent not offered |
+| Gamepad passthrough | **N/A** — not implemented on either platform in this tree |
+| Screen privacy / blank host | **N/A** — not present as a client feature in this tree |
+| Low-level system-key hook | **Partial** — X11/Wayland focused-window keys only (no Win LL hook) |
 
 ## Soak flags
 

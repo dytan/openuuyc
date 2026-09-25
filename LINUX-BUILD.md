@@ -107,3 +107,19 @@ forward/import the user D-Bus session.
 | CJK glyphs wrong (JP forms) | Ensure SC face index 2 path exists under `/usr/share/fonts/...` |
 | Clipboard file paste fails | `fuse3` installed; session permits FUSE mounts |
 | Duplicate instance | flock under `$XDG_RUNTIME_DIR`; stale locks clear on logout |
+
+
+## CI / prebuilt binaries
+
+GitHub Actions on this fork (`.github/workflows/linux-release.yml`) builds a
+release binary on **Ubuntu 22.04** and packages
+`OpenUUYC-linux-x86_64-<version>.tar.gz` (binary + `INSTALL.txt`).
+
+- **`workflow_dispatch`**: upload Actions artifacts only (no Release).
+- **Push tag `v*`** (e.g. `v0.7.0` matching `Cargo.toml`): create a GitHub Release.
+
+Consumers on a compatible x86_64 glibc distro can run the binary without a local
+Rust toolchain. They still need runtime packages (libva + drivers, fuse3,
+Vulkan/Mesa, ALSA — see `packaging/linux/INSTALL.txt`). Debug `cargo build`
+outputs are not portable across distros; use the release artifact or compile on
+the target machine for development.

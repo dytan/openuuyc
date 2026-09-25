@@ -1,0 +1,51 @@
+OpenUUYC Linux controller — runtime install notes
+=================================================
+
+This tarball contains a release binary built on Ubuntu 22.04 (glibc 2.35).
+It is intended for common x86_64 Linux desktops with a compatible glibc.
+
+You do NOT need to compile on every machine when using this binary.
+You DO need runtime libraries and a graphical session.
+
+Quick start
+-----------
+  tar -xzf OpenUUYC-linux-x86_64-<version>.tar.gz
+  cd OpenUUYC-linux-x86_64-<version>
+  ./OpenUUYC gui
+
+Runtime packages (Debian/Ubuntu names)
+--------------------------------------
+  sudo apt install --no-install-recommends \
+    libva2 libva-drm2 \
+    mesa-va-drivers           # or intel-media-va-driver / nvidia equivalent
+    libfuse3-3 fuse3 \
+    libvulkan1 mesa-vulkan-drivers \
+    libxkbcommon0 libxcb1 \
+    libasound2 \
+    fonts-noto-cjk
+
+  # Optional GPU ICD examples: intel-media-va-driver-non-free, mesa-vulkan-drivers
+
+Arch Linux
+----------
+  sudo pacman -S --needed libva mesa fuse3 vulkan-icd-loader \
+    libxkbcommon libxcb alsa-lib noto-fonts-cjk
+  # plus vulkan-intel / vulkan-radeon / nvidia-utils as appropriate
+
+Fedora
+------
+  sudo dnf install libva mesa-libva fuse3 vulkan-loader \
+    libxkbcommon libxcb alsa-lib google-noto-sans-cjk-fonts
+
+Important
+---------
+- VA-API hardware decode needs working local libva + GPU drivers. Without them
+  the binary still runs and falls back to software H.264.
+- Clipboard file paste needs FUSE (fuse3) and permission to mount.
+- Auth uses Secret Service (gnome-keyring / KWallet); ensure a D-Bus user session.
+- Debug builds from `cargo build` are not portable across distros; prefer this
+  release artifact or build on the target machine for development.
+
+Build from source
+-----------------
+  See LINUX-BUILD.md in the repository.

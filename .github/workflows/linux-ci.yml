@@ -1,0 +1,57 @@
+# PR / main compile check for the Linux controller.
+name: Linux CI
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - "handoff/**"
+  pull_request:
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - "handoff/**"
+
+concurrency:
+  group: linux-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: cargo build (ubuntu-22.04)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config clang libclang-dev \
+            libssl-dev \
+            libxkbcommon-dev libx11-dev libxi-dev libxcursor-dev libxrandr-dev libxss-dev \
+            libwayland-dev wayland-protocols \
+            libgl1-mesa-dev libvulkan-dev \
+            libva-dev \
+            libfuse3-dev \
+            libasound2-dev \
+            libdbus-1-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build (release)
+        run: cargo build --release --locked
+
+      - name: Smoke binary
+        run: |
+          ./target/release/OpenUUYC --help
+          ./target/release/OpenUUYC gui --help
