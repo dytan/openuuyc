@@ -46,6 +46,7 @@ mod power;
 mod presence;
 mod remote_cursor;
 mod remote_input;
+mod mac_keycodes;
 mod remote_upgrade;
 mod rsfec;
 pub mod rtc;

@@ -1165,7 +1165,7 @@ impl StreamControlHandle {
             return;
         }
         if state.mouse.mode() == MouseMode::View
-            || !state.mouse.keyboard_supported()
+            || !state.mouse.windows_sas_supported()
             || state.mouse.waiting_for_neutral()
         {
             return;

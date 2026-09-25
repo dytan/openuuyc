@@ -989,7 +989,7 @@ crate::ui::controls::observe_notice(ui.ctx(), "clipboard-error", "剪贴板同�
                                 let can_send = snapshot.ready
                                     && !snapshot.mouse_pending
                                     && snapshot.mouse_mode != MouseMode::View
-                                    && handle.mouse().keyboard_supported()
+                                    && handle.mouse().windows_sas_supported()
                                     && !handle.mouse().waiting_for_neutral();
                                 if menu_row(
                                     ui,

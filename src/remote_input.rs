@@ -216,6 +216,11 @@ impl RemoteInput {
     }
 
     pub fn keyboard_supported(&self) -> bool {
+        matches!(self.lock().keyboard_platform, 1 | 4)
+    }
+
+    /// Ctrl+Alt+Del / SecureDesktop SAS is a Windows Winlogon chord only.
+    pub fn windows_sas_supported(&self) -> bool {
         self.lock().keyboard_platform == 1
     }
 
@@ -272,21 +277,48 @@ impl RemoteInput {
             return false;
         }
         let mut s = self.lock();
-        if s.keyboard_platform != 1 {
+        let platform = s.keyboard_platform;
+        if !matches!(platform, 1 | 4) {
+            tracing::debug!(
+                target: "openuuyc::viewer::input",
+                platform,
+                key,
+                down,
+                "keyboard event dropped: platform has no keyboard adapter"
+            );
             return false;
         }
+        // Adapters always supply Windows VKs. macOS hosts need CGKeyCodes on the
+        // wire (same transform UU Android applies via WindowsToMacTransformer).
+        let (wire_key, win_vk) = if platform == 4 {
+            match crate::mac_keycodes::win_vk_to_mac(key) {
+                Some(mac) => (mac, key),
+                None => {
+                    tracing::debug!(
+                        target: "openuuyc::viewer::input",
+                        key,
+                        down,
+                        "macOS keyboard: no CGKeyCode for Windows VK; dropping"
+                    );
+                    return false;
+                }
+            }
+        } else {
+            (key, key)
+        };
         if down {
             if !Self::claim(&mut s, owner) {
                 return false;
             }
-        } else if s.owner != Some(owner) || !s.keys.contains_key(&key) {
+        } else if s.owner != Some(owner) || !s.keys.contains_key(&wire_key) {
             return false;
         }
-        let lock = lock.filter(|v| matches!(key, 20 | 144 | 145) && matches!(v, 0 | 128));
+        // Lock-status fields are Windows-only (Caps/Num/Scroll VKs).
+        let lock = lock.filter(|v| platform == 1 && matches!(key, 20 | 144 | 145) && matches!(v, 0 | 128));
         let accepted = Self::push(
             &mut s,
             InputEvent::Key {
-                key,
+                key: wire_key,
                 down,
                 lock,
                 interrupt: true,
@@ -294,10 +326,19 @@ impl RemoteInput {
         );
         if accepted {
             if down {
-                s.keys.insert(key, lock);
+                s.keys.insert(wire_key, lock);
             } else {
-                s.keys.remove(&key);
+                s.keys.remove(&wire_key);
             }
+            tracing::info!(
+                target: "openuuyc::viewer::input",
+                platform,
+                win_vk,
+                wire_key,
+                down,
+                queue = s.queue.len(),
+                "keyboard edge queued for CONTROL"
+            );
         }
         drop(s);
         self.wake.notify_one();
@@ -460,9 +501,15 @@ impl RemoteInput {
         s.keyboard_generation = s.keyboard_generation.wrapping_add(1);
         s.release_checkpoint.extend(s.remote_keys.keys().copied());
         // Release ordinary keys before modifiers; never synthesize new downs.
+        let platform = s.keyboard_platform;
         for modifier in [false, true] {
             for &key in s.remote_keys.keys() {
-                if matches!(key, 16..=18 | 91..=92 | 160..=165) == modifier {
+                let is_mod = if platform == 4 {
+                    crate::mac_keycodes::is_mac_modifier(key)
+                } else {
+                    matches!(key, 16..=18 | 91..=92 | 160..=165)
+                };
+                if is_mod == modifier {
                     s.queue.push_back(InputEvent::Key {
                         key,
                         down: false,
