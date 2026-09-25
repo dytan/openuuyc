@@ -99,6 +99,12 @@ fn main() {
         major > desired_major || (major == desired_major && minor >= desired_minor)
     };
 
+    // Declare custom cfgs so rustc check-cfg does not warn.
+    println!("cargo::rustc-check-cfg=cfg(libva_1_21_or_higher)");
+    println!("cargo::rustc-check-cfg=cfg(libva_1_20_or_higher)");
+    println!("cargo::rustc-check-cfg=cfg(libva_1_19_or_higher)");
+    println!("cargo::rustc-check-cfg=cfg(libva_1_16_or_higher)");
+
     if va_check_version(1, 21) {
         println!("cargo::rustc-cfg=libva_1_21_or_higher");
     }

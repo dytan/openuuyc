@@ -434,8 +434,10 @@ impl EncPictureParameterBufferVP9 {
             skip_frame_flag,
             number_skip_frames,
             skip_frames_size,
-            // libva ≥ 2.21 added these fields; zero them for encode init.
+            // libva ≥ 1.21 (pkg ≥ ~2.21) added these fields; gate for older headers (e.g. Ubuntu 22.04).
+            #[cfg(libva_1_21_or_higher)]
             seg_id_block_size: 0,
+            #[cfg(libva_1_21_or_higher)]
             va_reserved8: [0; 3],
             va_reserved: Default::default(),
         }))
