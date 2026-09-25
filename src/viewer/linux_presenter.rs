@@ -622,7 +622,7 @@ struct Player {
     motion_remainder: [f64; 2],
     /// Throttles the pointer diagnostics, which stay off unless
     /// `openuuyc::viewer::input` is enabled at debug.
-    diagnostics_at: [Option<Instant>; 2],
+    diagnostics_at: [Option<Instant>; 4],
     /// When the remote first said its pointer was hidden, for [`CURSOR_HIDE_GRACE`].
     hidden_since: Option<Instant>,
 }
@@ -659,7 +659,7 @@ impl Player {
             pointer_locked: false,
             focused: true,
             motion_remainder: [0.0, 0.0],
-            diagnostics_at: [None; 2],
+            diagnostics_at: [None; 4],
             hidden_since: None,
         })
     }
