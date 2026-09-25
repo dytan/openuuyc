@@ -44,8 +44,8 @@ enum Commands {
         /// 初始视频编码：auto、h264 或 h265
         #[arg(long, default_value = "auto")]
         codec: media::CodecPreference,
-        /// 是否优先使用平台原生硬件解码器
-        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        /// 是否优先使用平台原生硬件解码器（Linux 默认 false：仅有软件 H.264）
+        #[arg(long, default_value_t = media::default_hardware_decode(), action = clap::ArgAction::Set)]
         hardware_decode: bool,
         /// 传输策略：auto、p2p 或 relay
         #[arg(long, default_value = "auto")]
@@ -84,8 +84,8 @@ enum Commands {
         /// 视频编码：auto、h264 或 h265
         #[arg(long, default_value = "auto")]
         codec: media::CodecPreference,
-        /// 是否优先使用平台原生硬件解码器
-        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        /// 是否优先使用平台原生硬件解码器（Linux 默认 false：仅有软件 H.264）
+        #[arg(long, default_value_t = media::default_hardware_decode(), action = clap::ArgAction::Set)]
         hardware_decode: bool,
         /// 传输策略：auto、p2p 或 relay
         #[arg(long, default_value = "auto")]
@@ -117,7 +117,7 @@ fn main() -> Result<()> {
     let command = cli.command.unwrap_or(Commands::Gui {
         fps: media::FrameRateChoice::Auto,
         codec: media::CodecPreference::Auto,
-        hardware_decode: true,
+        hardware_decode: media::default_hardware_decode(),
         transport: media::TransportChoice::Auto,
     });
 

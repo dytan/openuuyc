@@ -241,14 +241,16 @@ fn is_retryable_poll_error(error: &Error) -> bool {
 }
 
 pub fn auth_status() -> Result<()> {
+    let available = KeyringSessionStore::platform_store_available();
     println!(
         "platform credential store: {}",
-        if KeyringSessionStore::platform_store_available() {
-            "available"
-        } else {
-            "unavailable"
-        }
+        if available { "available" } else { "unavailable" }
     );
+    if !available {
+        // Surface the same actionable context `KeyringSessionStore::new` would.
+        let _ = KeyringSessionStore::new()?;
+        unreachable!("platform_store_available was false");
+    }
     let store = KeyringSessionStore::new()?;
     println!(
         "saved login session: {}",

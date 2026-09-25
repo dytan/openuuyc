@@ -145,7 +145,14 @@ impl GlowHostSurface {
         }
     }
 
+    fn make_current(&self) -> Result<()> {
+        self.gl_context
+            .make_current(&self.gl_surface)
+            .context("make viewer GL context current")
+    }
+
     fn swap(&self) -> Result<()> {
+        self.make_current()?;
         self.gl_surface
             .swap_buffers(&self.gl_context)
             .context("viewer swap buffers")
@@ -389,6 +396,7 @@ impl ConnectingWindowsRunner {
             return Ok(());
         };
 
+        surface.make_current()?;
         self.next_repaint = None;
         egui_winit::update_viewport_info(&mut self.viewport, context, &surface.window, false);
         let mut raw = input.take_egui_input(&surface.window);
@@ -780,6 +788,9 @@ impl ApplicationHandler<UiEvent> for ConnectingWindowsRunner {
         self.input = None;
         self.context = None;
         if let Some(mut painter) = self.painter.take() {
+            if let Some(surface) = &self.surface {
+                let _ = surface.make_current();
+            }
             painter.destroy();
         }
         self.surface = None;

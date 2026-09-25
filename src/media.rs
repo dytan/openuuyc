@@ -160,10 +160,15 @@ impl Default for ConnectionMediaOptions {
             muted: false,
             frame_rate: FrameRateChoice::Auto,
             codec: CodecPreference::Auto,
-            hardware_decode: true,
+            hardware_decode: default_hardware_decode(),
             transport: TransportChoice::Auto,
         }
     }
+}
+
+/// Prefer software decode on Linux until a native HW path exists.
+pub const fn default_hardware_decode() -> bool {
+    !cfg!(target_os = "linux")
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]

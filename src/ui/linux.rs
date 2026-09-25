@@ -145,7 +145,14 @@ impl GlowHostSurface {
         }
     }
 
+    fn make_current(&self) -> Result<()> {
+        self.gl_context
+            .make_current(&self.gl_surface)
+            .context("make GL context current")
+    }
+
     fn swap(&self) -> Result<()> {
+        self.make_current()?;
         self.gl_surface
             .swap_buffers(&self.gl_context)
             .context("swap GL buffers")
@@ -194,6 +201,7 @@ struct DesktopWindow {
 impl Drop for DesktopWindow {
     fn drop(&mut self) {
         self.surface.window.set_visible(false);
+        let _ = self.surface.make_current();
         self.painter.destroy();
     }
 }
@@ -209,6 +217,7 @@ impl DesktopWindow {
     fn render(&mut self) -> Result<()> {
         use glow::HasContext as _;
 
+        self.surface.make_current()?;
         self.next_repaint = None;
         self.last_frame = Some(Instant::now());
         egui_winit::update_viewport_info(

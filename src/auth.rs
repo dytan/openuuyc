@@ -1,8 +1,9 @@
 //! Cross-platform persistence for the login session and virtual device.
 //!
 //! Both records are kept in the operating system credential service. There is
-//! deliberately no plaintext fallback: credentials use Windows Credential Manager
-//! through the `keyring` crate.
+//! deliberately no plaintext fallback: credentials use the platform store through
+//! the `keyring` crate (Windows Credential Manager; Linux Secret Service via
+//! D-Bus / gnome-keyring or compatible).
 
 use std::fmt;
 
@@ -306,6 +307,11 @@ pub struct KeyringIdentityStore {
 
 impl KeyringIdentityStore {
     pub fn new() -> Result<Self> {
+        if let Err(error) = Entry::store_status() {
+            return Err(anyhow::Error::new(error))
+                .context(credential_store_unavailable_hint())
+                .context("native secure credential store is unavailable");
+        }
         let entry = Entry::new(SERVICE, IDENTITY_ACCOUNT)
             .context("native secure credential store is unavailable")?;
         Ok(Self { entry })
@@ -381,8 +387,29 @@ impl KeyringIdentityStore {
     }
 }
 
+
+fn credential_store_unavailable_hint() -> &'static str {
+    #[cfg(target_os = "linux")]
+    {
+        "Linux needs a D-Bus user session and Secret Service (e.g. gnome-keyring). Set DBUS_SESSION_BUS_ADDRESS (often unix:path=$XDG_RUNTIME_DIR/bus) and unlock the keyring"
+    }
+    #[cfg(windows)]
+    {
+        "Windows Credential Manager must be available to the current user session"
+    }
+    #[cfg(not(any(target_os = "linux", windows)))]
+    {
+        "platform secure credential store could not be initialized"
+    }
+}
+
 impl KeyringSessionStore {
     pub fn new() -> Result<Self> {
+        if let Err(error) = Entry::store_status() {
+            return Err(anyhow::Error::new(error))
+                .context(credential_store_unavailable_hint())
+                .context("native secure credential store is unavailable");
+        }
         let entry = Entry::new(SERVICE, SESSION_ACCOUNT)
             .context("native secure credential store is unavailable")?;
         Ok(Self { entry })
