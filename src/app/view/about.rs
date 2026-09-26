@@ -39,7 +39,7 @@ impl DeviceCenterApp {
                             RichText::new(format!(
                                 "v{}  ·  {} {}",
                                 env!("CARGO_PKG_VERSION"),
-                                "Windows",
+                                about_host_os(),
                                 std::env::consts::ARCH
                             ))
                             .size(crate::ui::theme::SMALL)
@@ -205,3 +205,13 @@ impl DeviceCenterApp {
         }
     }
 }
+
+fn about_host_os() -> &'static str {
+    match std::env::consts::OS {
+        "windows" => "Windows",
+        "linux" => "Linux",
+        "macos" => "macOS",
+        other => other,
+    }
+}
+
