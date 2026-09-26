@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=OpenUUYC
+GenericName=Remote Desktop Controller
+Comment=Third-party Rust client for UU Remote protocol interoperability
+Exec=OpenUUYC gui
+Icon=openuuyc
+Terminal=false
+Categories=Network;RemoteAccess;
+Keywords=remote;desktop;UU;controller;
+StartupNotify=true
+StartupWMClass=OpenUUYC

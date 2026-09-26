@@ -71,6 +71,10 @@ jobs:
           mkdir -p "${STAGE}"
           install -m 755 target/release/OpenUUYC "${STAGE}/OpenUUYC"
           install -m 644 packaging/linux/INSTALL.txt "${STAGE}/INSTALL.txt"
+          install -m 755 packaging/linux/install.sh "${STAGE}/install.sh"
+          install -m 644 packaging/linux/openuuyc.desktop "${STAGE}/openuuyc.desktop"
+          mkdir -p "${STAGE}/icons"
+          cp -a packaging/linux/icons/. "${STAGE}/icons/"
           # Short README slice for operators who only grab the release asset.
           {
             echo "# OpenUUYC Linux controller ${VERSION}"
@@ -79,6 +83,8 @@ jobs:
             echo "Commit: ${GITHUB_SHA}"
             echo
             echo "See INSTALL.txt for runtime dependencies and how to run."
+            echo "Desktop/app-launcher install: sudo ./install.sh"
+            echo "  (or: PREFIX=\$HOME/.local ./install.sh)"
             echo "Full docs: README.md / LINUX.md / LINUX-BUILD.md in the repo."
           } > "${STAGE}/README.txt"
           mkdir -p dist
@@ -123,8 +129,10 @@ jobs:
             echo '```bash'
             echo "tar -xzf ${NAME}.tar.gz"
             echo "cd ${NAME}"
-            echo "# install runtime packages (see INSTALL.txt), then:"
+            echo "# install runtime packages (see INSTALL.txt), then either:"
             echo "./OpenUUYC gui"
+            echo "# or install for the app launcher:"
+            echo "sudo ./install.sh   # or: PREFIX=\$HOME/.local ./install.sh"
             echo '```'
             echo
             echo "You do **not** need Rust or a local compile on each machine if you use"

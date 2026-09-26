@@ -109,11 +109,28 @@ forward/import the user D-Bus session.
 | Duplicate instance | flock under `$XDG_RUNTIME_DIR`; stale locks clear on logout |
 
 
+
+## Install (desktop / app launcher)
+
+After `cargo build --release --locked`:
+
+```bash
+# System-wide (default PREFIX=/usr/local)
+sudo ./packaging/linux/install.sh
+
+# Per-user
+PREFIX="$HOME/.local" ./packaging/linux/install.sh
+```
+
+This installs the binary onto `PATH`, a `.desktop` entry, and hicolor icons so
+desktop launchers can find **OpenUUYC**. Prebuilt release tarballs ship the same
+`install.sh` at the archive root — see `packaging/linux/INSTALL.txt`.
+
 ## CI / prebuilt binaries
 
 GitHub Actions on this fork (`.github/workflows/linux-release.yml`) builds a
 release binary on **Ubuntu 22.04** and packages
-`OpenUUYC-linux-x86_64-<version>.tar.gz` (binary + `INSTALL.txt`).
+`OpenUUYC-linux-x86_64-<version>.tar.gz` (binary, desktop entry/icons, `install.sh`, `INSTALL.txt`).
 
 - **`workflow_dispatch`**: upload Actions artifacts only (no Release).
 - **Push tag `v*`** (e.g. `v0.7.0` matching `Cargo.toml`): create a GitHub Release.

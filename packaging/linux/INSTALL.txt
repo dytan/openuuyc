@@ -7,11 +7,34 @@ It is intended for common x86_64 Linux desktops with a compatible glibc.
 You do NOT need to compile on every machine when using this binary.
 You DO need runtime libraries and a graphical session.
 
-Quick start
------------
+Quick start (run from extracted directory)
+-----------------------------------------
   tar -xzf OpenUUYC-linux-x86_64-<version>.tar.gz
   cd OpenUUYC-linux-x86_64-<version>
   ./OpenUUYC gui
+
+Desktop install (app launcher / Cmd+Space style search)
+-------------------------------------------------------
+  # System-wide (needs write access to PREFIX; default /usr/local):
+  sudo ./install.sh
+
+  # Per-user (no root; Hyprland / most desktops pick up ~/.local):
+  PREFIX="$HOME/.local" ./install.sh
+
+  This installs:
+    $PREFIX/bin/OpenUUYC          (and openuuyc symlink)
+    $PREFIX/share/applications/openuuyc.desktop
+    $PREFIX/share/icons/hicolor/*/apps/openuuyc.png
+
+  Then open the app launcher and search for "OpenUUYC".
+  Ensure $PREFIX/bin is on your PATH (true for /usr/local and ~/.local by default
+  on most distros).
+
+From a source checkout after `cargo build --release --locked`:
+  ./packaging/linux/install.sh
+  # or: PREFIX="$HOME/.local" ./packaging/linux/install.sh
+
+DESTDIR is supported for packaging (e.g. PREFIX=/usr DESTDIR=/tmp/stage).
 
 Runtime packages (Debian/Ubuntu names)
 --------------------------------------

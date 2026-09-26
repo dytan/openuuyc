@@ -9,7 +9,7 @@ This repository ([dytan/openuuyc](https://github.com/dytan/openuuyc)) is a colla
 ## 下载与使用 / Downloads
 
 - **Windows**: download the x64 client from upstream [Releases](https://github.com/djkcyl/openuuyc/releases), run it, sign in (QR or SMS), then connect. The remote device must be running UU Remote.
-- **Linux (this fork)**: prefer a prebuilt controller from this repo's [Releases](https://github.com/dytan/openuuyc/releases) when available (`OpenUUYC-linux-x86_64-<version>.tar.gz`). Extract, install runtime packages (see `INSTALL.txt` in the archive), then `./OpenUUYC gui`. You do **not** need to compile on each machine for the same arch/glibc; you still need runtime libs (libva + GPU drivers, fuse3, Vulkan/Mesa, ALSA). Or [build from source](#build-linux) below.
+- **Linux (this fork)**: prefer a prebuilt controller from this repo's [Releases](https://github.com/dytan/openuuyc/releases) when available (`OpenUUYC-linux-x86_64-<version>.tar.gz`). Extract, install runtime packages (see `INSTALL.txt` in the archive), then `./OpenUUYC gui` or `sudo ./install.sh` for an app-launcher desktop entry. You do **not** need to compile on each machine for the same arch/glibc; you still need runtime libs (libva + GPU drivers, fuse3, Vulkan/Mesa, ALSA). Or [build from source](#build-linux) below.
 
 ## 功能 / Features (upstream)
 
