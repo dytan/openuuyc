@@ -1730,6 +1730,7 @@ impl StreamControlHandle {
                                 .then(|| "对端不支持当前串流协议（需要CaptureSetting RPC）".into());
                             tracing::info!(
                                 capture_setting_feature_level = state.peer_capture_setting,
+                                peer_clipboard = state.peer_clipboard,
                                 protocol = protocol(&state).label(),
                                 "official protobuf feature negotiation completed"
                             );
@@ -1952,7 +1953,7 @@ impl StreamControlHandle {
         // that never syncs looks identical whichever one is missing.
         if clipboard_ready != state.clipboard_ready_reported {
             state.clipboard_ready_reported = clipboard_ready;
-            tracing::debug!(
+            tracing::info!(
                 ready = clipboard_ready,
                 viewing = state.viewing_enabled,
                 pb = state.pb_connected,

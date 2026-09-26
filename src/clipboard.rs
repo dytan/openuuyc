@@ -151,7 +151,11 @@ impl Clipboard {
         static NEXT: AtomicU64 = AtomicU64::new(1);
         Self(Arc::new(Inner {
             id: NEXT.fetch_add(1, Ordering::Relaxed),
-            enabled: AtomicBool::new(false),
+            // Text/image sync on by default (files stay behind `files` /
+            // connection `clipboard_files`). Matches remote-desktop expectation
+            // that paste works once 键鼠控制 is active; player menu can still
+            // turn it off.
+            enabled: AtomicBool::new(true),
             files: AtomicBool::new(true),
             active: AtomicBool::new(false),
             allowed_files: AtomicBool::new(true),

@@ -371,12 +371,18 @@ fn process(state: &mut State, command: Command) {
         Command::Activate(weak) => {
             if let Some(session) = weak.upgrade() {
                 state.sessions.insert(session.id, Arc::downgrade(&session));
-                tracing::debug!(
+                tracing::info!(
                     id = session.id,
                     sessions = state.sessions.len(),
                     files = session.file_allowed(),
+                    platform = session.platform.load(Ordering::Acquire),
                     "剪贴板会话已注册"
                 );
+                // poll_local skips when the snapshot is unchanged, so a session
+                // that joins after a local copy would never see FormatList.
+                if let Err(error) = publish_local(state) {
+                    tracing::debug!(%error, "激活后发布本地剪贴板失败");
+                }
             }
         }
         Command::Remove(id) => {
@@ -702,6 +708,12 @@ fn poll_local(state: &mut State) -> Result<()> {
     state.local = snapshot;
     // The previous copy is gone; a read still in flight against it now fails.
     state.tasks.clear();
+    publish_local(state)
+}
+
+/// Advertise `state.local` to every active session (FormatList), or clear
+/// publications when empty.
+fn publish_local(state: &mut State) -> Result<()> {
     if state.local.is_empty() {
         state.published.clear();
         return Ok(());

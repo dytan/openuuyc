@@ -57,7 +57,8 @@ pub(super) fn incoming(f: ClipboardFormat, platform: i32, files: bool) -> Option
     let local = if platform == 4 {
         match f.name.as_str() {
             "public.utf8-plain-text" | "public.utf16-plain-text" | "public.plain-text" => 13,
-            "public.tiff" => 8,
+            // Mac pasteboard often offers PNG/JPEG rather than TIFF.
+            "public.tiff" | "public.png" | "public.jpeg" | "public.jpeg-image" => 8,
             "public.html" => register("HTML Format"),
             "public.file-url" if files => register("FileGroupDescriptorW"),
             _ => return None,
@@ -90,7 +91,8 @@ pub(super) fn outgoing(ids: &[(u32, String)], platform: i32, files: bool) -> Vec
         }
         let names: &[&str] = match *id {
             13 => &["public.utf8-plain-text", "public.utf16-plain-text"],
-            8 => &["public.tiff"],
+            // Prefer PNG for macOS peers; keep TIFF as a fallback UTI.
+            8 => &["public.png", "public.tiff"],
             _ if n == "HTML Format" => &["public.html"],
             _ if n == "FileGroupDescriptorW" => &["public.file-url"],
             _ => &[],
@@ -191,11 +193,17 @@ pub(super) fn convert(data: Vec<u8>, f: &Format, platform: i32, outbound: bool) 
                 result
             }
         }
-        "public.tiff" => {
+        "public.tiff" | "public.png" | "public.jpeg" | "public.jpeg-image" => {
+            let wire = f.wire.name.as_str();
             let (bytes, kind) = if outbound {
                 (dib_to_bmp(&data)?, image::ImageFormat::Bmp)
             } else {
-                (data, image::ImageFormat::Tiff)
+                let kind = match wire {
+                    "public.png" => image::ImageFormat::Png,
+                    "public.jpeg" | "public.jpeg-image" => image::ImageFormat::Jpeg,
+                    _ => image::ImageFormat::Tiff,
+                };
+                (data, kind)
             };
             let mut reader = image::ImageReader::with_format(Cursor::new(bytes), kind);
             let mut limits = image::Limits::default();
@@ -205,10 +213,15 @@ pub(super) fn convert(data: Vec<u8>, f: &Format, platform: i32, outbound: bool) 
             reader.limits(limits);
             let image = reader.decode()?;
             let mut out = Cursor::new(Vec::new());
+            let outbound_fmt = match wire {
+                "public.png" => image::ImageFormat::Png,
+                "public.jpeg" | "public.jpeg-image" => image::ImageFormat::Jpeg,
+                _ => image::ImageFormat::Tiff,
+            };
             image.write_to(
                 &mut out,
                 if outbound {
-                    image::ImageFormat::Tiff
+                    outbound_fmt
                 } else {
                     image::ImageFormat::Bmp
                 },
