@@ -1,20 +1,29 @@
 OpenUUYC Linux controller — runtime install notes
 =================================================
 
-This tarball contains a release binary built on Ubuntu 22.04 (glibc 2.35).
-It is intended for common x86_64 Linux desktops with a compatible glibc.
+Prebuilt artifacts are built on Ubuntu 22.04 (glibc 2.35) unless noted.
+They are intended for common x86_64 Linux desktops with a compatible glibc.
 
-You do NOT need to compile on every machine when using this binary.
+You do NOT need to compile on every machine when using a release artifact.
 You DO need runtime libraries and a graphical session.
 
-Quick start (run from extracted directory)
------------------------------------------
+Artifacts
+---------
+  OpenUUYC-linux-x86_64-<version>.tar.gz   — binary + install.sh + desktop/icons
+  OpenUUYC-x86_64-<version>.AppImage       — portable single file (GUI by default)
+  openuuyc_<version>_amd64.deb             — Debian/Ubuntu package
+  openuuyc-<version>-1-x86_64.pkg.tar.zst  — Arch package (built on Arch / Omarchy)
+
+  See packaging/linux/PACKAGING.md in the repository for full packaging notes.
+
+Quick start — tarball
+---------------------
   tar -xzf OpenUUYC-linux-x86_64-<version>.tar.gz
   cd OpenUUYC-linux-x86_64-<version>
   ./OpenUUYC gui
 
-Desktop install (app launcher / Cmd+Space style search)
--------------------------------------------------------
+Desktop install from tarball (app launcher)
+-------------------------------------------
   # System-wide (needs write access to PREFIX; default /usr/local):
   sudo ./install.sh
 
@@ -36,6 +45,32 @@ From a source checkout after `cargo build --release --locked`:
 
 DESTDIR is supported for packaging (e.g. PREFIX=/usr DESTDIR=/tmp/stage).
 
+AppImage
+--------
+  chmod +x OpenUUYC-x86_64-<version>.AppImage
+  ./OpenUUYC-x86_64-<version>.AppImage          # launches GUI
+  ./OpenUUYC-x86_64-<version>.AppImage --help
+
+  Thin AppImage: ships the binary + desktop/icons. Host GPU drivers (libva /
+  Vulkan ICDs) are still required — same as the tarball.
+
+Debian / Ubuntu (.deb)
+----------------------
+  sudo apt install ./openuuyc_<version>_amd64.deb
+  OpenUUYC gui
+
+Arch Linux / Omarchy
+--------------------
+  # From a source checkout (rustup cargo: add -d; reuse binary: OPENUUYC_SKIP_BUILD=1):
+  cd packaging/arch && ./sync-pkgver.sh && makepkg -f
+  sudo pacman -U openuuyc-<version>-1-x86_64.pkg.tar.zst
+
+  # Or package a downloaded release tarball without compiling:
+  cd packaging/arch
+  # place OpenUUYC-linux-x86_64-<version>.tar.gz alongside PKGBUILD-bin
+  makepkg -f -p PKGBUILD-bin
+  sudo pacman -U openuuyc-bin-<version>-1-x86_64.pkg.tar.zst
+
 Runtime packages (Debian/Ubuntu names)
 --------------------------------------
   sudo apt install --no-install-recommends \
@@ -54,6 +89,7 @@ Arch Linux
   sudo pacman -S --needed libva mesa fuse3 vulkan-icd-loader \
     libxkbcommon libxcb alsa-lib noto-fonts-cjk
   # plus vulkan-intel / vulkan-radeon / nvidia-utils as appropriate
+  # VA-API: libva-mesa-driver and/or intel-media-driver
 
 Fedora
 ------
@@ -66,7 +102,7 @@ Important
   the binary still runs and falls back to software H.264.
 - Clipboard file paste needs FUSE (fuse3) and permission to mount.
 - Auth uses Secret Service (gnome-keyring / KWallet); ensure a D-Bus user session.
-- Debug builds from `cargo build` are not portable across distros; prefer this
+- Debug builds from `cargo build` are not portable across distros; prefer a
   release artifact or build on the target machine for development.
 
 Build from source

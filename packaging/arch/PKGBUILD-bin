@@ -1,0 +1,58 @@
+# Binary package: install a prebuilt OpenUUYC-linux-x86_64-<ver> tarball.
+# Usage:
+#   export OPENUUYC_TARBALL=/path/to/OpenUUYC-linux-x86_64-0.7.0.tar.gz
+#   cd packaging/arch && makepkg -f -p PKGBUILD-bin
+#
+# Or place the tarball next to this file and set source= below.
+
+pkgname=openuuyc-bin
+_pkgname=openuuyc
+pkgver=0.7.0
+pkgrel=1
+pkgdesc="Native Linux controller for UU Remote (prebuilt binary)"
+arch=('x86_64')
+url="https://github.com/dytan/openuuyc"
+license=('LicenseRef-OpenUUYC-proprietary')
+provides=("${_pkgname}")
+conflicts=("${_pkgname}")
+depends=(
+  'glibc'
+  'gcc-libs'
+  'libva'
+  'libdrm'
+  'libxcb'
+  'libxau'
+  'libxdmcp'
+  'alsa-lib'
+  'fuse3'
+  'vulkan-icd-loader'
+)
+optdepends=(
+  'mesa: VA-API / Vulkan drivers'
+  'intel-media-driver: Intel VA-API'
+  'noto-fonts-cjk: CJK UI fonts'
+)
+# Prefer an explicitly provided tarball path for local packaging.
+# For release automation, point source at the GitHub release asset.
+source=("${OPENUUYC_TARBALL:-OpenUUYC-linux-x86_64-${pkgver}.tar.gz}")
+sha256sums=('SKIP')
+
+package() {
+  # Tarball extracts to OpenUUYC-linux-x86_64-<ver>/
+  local extract_dir
+  extract_dir="$(find "${srcdir}" -maxdepth 1 -type d -name 'OpenUUYC-linux-x86_64-*' | head -1)"
+  if [[ -z "${extract_dir}" ]]; then
+    # Flat layout fallback
+    extract_dir="${srcdir}"
+  fi
+  cd "${extract_dir}"
+  if [[ -x ./install.sh ]]; then
+    DESTDIR="${pkgdir}" PREFIX=/usr OPENUUYC_BIN="${PWD}/OpenUUYC" ./install.sh
+  else
+    install -Dm755 OpenUUYC "${pkgdir}/usr/bin/OpenUUYC"
+    ln -sfn OpenUUYC "${pkgdir}/usr/bin/openuuyc"
+  fi
+  if [[ -f INSTALL.txt ]]; then
+    install -Dm644 INSTALL.txt "${pkgdir}/usr/share/doc/${_pkgname}/INSTALL.txt"
+  fi
+}

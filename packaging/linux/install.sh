@@ -97,11 +97,15 @@ else
   echo "warning: no icons/ tree found; desktop entry Icon=openuuyc may be missing" >&2
 fi
 
-if command -v update-desktop-database >/dev/null 2>&1; then
-  update-desktop-database "${ROOT}/share/applications" 2>/dev/null || true
-fi
-if command -v gtk-update-icon-cache >/dev/null 2>&1 && [[ -d "${ROOT}/share/icons/hicolor" ]]; then
-  gtk-update-icon-cache -f -t "${ROOT}/share/icons/hicolor" 2>/dev/null || true
+# Skip cache updates when staging for a package (DESTDIR set); the package
+# manager / user session regenerates these.
+if [[ -z "${DESTDIR}" ]]; then
+  if command -v update-desktop-database >/dev/null 2>&1; then
+    update-desktop-database "${ROOT}/share/applications" 2>/dev/null || true
+  fi
+  if command -v gtk-update-icon-cache >/dev/null 2>&1 && [[ -d "${ROOT}/share/icons/hicolor" ]]; then
+    gtk-update-icon-cache -f -t "${ROOT}/share/icons/hicolor" 2>/dev/null || true
+  fi
 fi
 
 echo

@@ -1,9 +1,10 @@
-# Build a portable-ish Linux x86_64 controller binary.
+# Build portable-ish Linux x86_64 controller artifacts.
 # - workflow_dispatch: upload Actions artifacts only (no GitHub Release)
-# - push tag v*: create a GitHub Release with the tarball + checksum
+# - push tag v*: create a GitHub Release with tarball + AppImage + .deb + checksums
 #
 # Runtime still needs distro libs (libva + GPU drivers, fuse3, Vulkan/Mesa,
-# ALSA). See packaging/linux/INSTALL.txt inside the tarball.
+# ALSA). See packaging/linux/INSTALL.txt / PACKAGING.md.
+# Arch .pkg.tar.zst is built on Arch via packaging/arch/PKGBUILD (not here).
 name: Linux release
 
 on:
@@ -36,7 +37,10 @@ jobs:
             libva-dev \
             libfuse3-dev \
             libasound2-dev \
-            libdbus-1-dev
+            libdbus-1-dev \
+            dpkg-dev fakeroot \
+            file desktop-file-utils \
+            curl ca-certificates
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -55,7 +59,7 @@ jobs:
           if [[ "${GITHUB_REF_TYPE}" == "tag" && "${GITHUB_REF_NAME}" == v* ]]; then
             VERSION="${GITHUB_REF_NAME#v}"
           else
-            VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+            VERSION="$(./packaging/linux/version.sh)"
           fi
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Resolved version: ${VERSION}"
@@ -75,7 +79,6 @@ jobs:
           install -m 644 packaging/linux/openuuyc.desktop "${STAGE}/openuuyc.desktop"
           mkdir -p "${STAGE}/icons"
           cp -a packaging/linux/icons/. "${STAGE}/icons/"
-          # Short README slice for operators who only grab the release asset.
           {
             echo "# OpenUUYC Linux controller ${VERSION}"
             echo
@@ -85,6 +88,7 @@ jobs:
             echo "See INSTALL.txt for runtime dependencies and how to run."
             echo "Desktop/app-launcher install: sudo ./install.sh"
             echo "  (or: PREFIX=\$HOME/.local ./install.sh)"
+            echo "Also available from this release: AppImage and .deb — see PACKAGING.md."
             echo "Full docs: README.md / LINUX.md / LINUX-BUILD.md in the repo."
           } > "${STAGE}/README.txt"
           mkdir -p dist
@@ -96,6 +100,33 @@ jobs:
           ls -lh "dist/${NAME}.tar.gz" "dist/${NAME}.tar.gz.sha256"
           cat "dist/${NAME}.tar.gz.sha256"
 
+      - name: Build .deb
+        id: deb
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          OPENUUYC_BIN: ${{ github.workspace }}/target/release/OpenUUYC
+          OUT_DIR: ${{ github.workspace }}/dist
+        run: |
+          set -euo pipefail
+          ./packaging/linux/build-deb.sh
+          DEB="dist/openuuyc_${VERSION}_amd64.deb"
+          echo "deb=${DEB}" >> "$GITHUB_OUTPUT"
+          echo "deb_checksum=${DEB}.sha256" >> "$GITHUB_OUTPUT"
+
+      - name: Build AppImage
+        id: appimage
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+          OPENUUYC_BIN: ${{ github.workspace }}/target/release/OpenUUYC
+          OUT_DIR: ${{ github.workspace }}/dist
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: |
+          set -euo pipefail
+          ./packaging/linux/build-appimage.sh
+          APP="dist/OpenUUYC-x86_64-${VERSION}.AppImage"
+          echo "appimage=${APP}" >> "$GITHUB_OUTPUT"
+          echo "appimage_checksum=${APP}.sha256" >> "$GITHUB_OUTPUT"
+
       - name: Upload Actions artifact
         uses: actions/upload-artifact@v4
         with:
@@ -103,6 +134,10 @@ jobs:
           path: |
             ${{ steps.pkg.outputs.tarball }}
             ${{ steps.pkg.outputs.checksum }}
+            ${{ steps.deb.outputs.deb }}
+            ${{ steps.deb.outputs.deb_checksum }}
+            ${{ steps.appimage.outputs.appimage }}
+            ${{ steps.appimage.outputs.appimage_checksum }}
           if-no-files-found: error
 
       - name: Publish GitHub Release (tags only)
@@ -113,38 +148,58 @@ jobs:
           TARBALL: ${{ steps.pkg.outputs.tarball }}
           CHECKSUM: ${{ steps.pkg.outputs.checksum }}
           NAME: ${{ steps.pkg.outputs.name }}
+          DEB: ${{ steps.deb.outputs.deb }}
+          DEB_CHECKSUM: ${{ steps.deb.outputs.deb_checksum }}
+          APPIMAGE: ${{ steps.appimage.outputs.appimage }}
+          APPIMAGE_CHECKSUM: ${{ steps.appimage.outputs.appimage_checksum }}
         run: |
           set -euo pipefail
           NOTES="$(mktemp)"
           {
             echo "## OpenUUYC Linux controller ${VERSION}"
             echo
-            echo "Prebuilt **x86_64 glibc** controller binary (built on Ubuntu 22.04)."
+            echo "Prebuilt **x86_64 glibc** controller (built on Ubuntu 22.04)."
             echo
-            echo "### Artifact"
-            echo "- \`${NAME}.tar.gz\` — \`OpenUUYC\` binary + \`INSTALL.txt\`"
-            echo "- \`${NAME}.tar.gz.sha256\` — SHA-256 checksum"
+            echo "### Artifacts"
+            echo "- \`${NAME}.tar.gz\` — binary + \`install.sh\` + desktop/icons"
+            echo "- \`OpenUUYC-x86_64-${VERSION}.AppImage\` — portable single file"
+            echo "- \`openuuyc_${VERSION}_amd64.deb\` — Debian/Ubuntu package"
+            echo "- \`*.sha256\` — SHA-256 checksums"
+            echo
+            echo "Arch Linux / Omarchy: use \`packaging/arch/PKGBUILD\` with \`makepkg\`"
+            echo "and \`pacman -U\` (not built on this Ubuntu runner)."
             echo
             echo "### Install"
             echo '```bash'
-            echo "tar -xzf ${NAME}.tar.gz"
-            echo "cd ${NAME}"
-            echo "# install runtime packages (see INSTALL.txt), then either:"
-            echo "./OpenUUYC gui"
-            echo "# or install for the app launcher:"
+            echo "# AppImage"
+            echo "chmod +x OpenUUYC-x86_64-${VERSION}.AppImage"
+            echo "./OpenUUYC-x86_64-${VERSION}.AppImage"
+            echo
+            echo "# Debian/Ubuntu"
+            echo "sudo apt install ./openuuyc_${VERSION}_amd64.deb"
+            echo
+            echo "# Tarball"
+            echo "tar -xzf ${NAME}.tar.gz && cd ${NAME}"
             echo "sudo ./install.sh   # or: PREFIX=\$HOME/.local ./install.sh"
             echo '```'
             echo
-            echo "You do **not** need Rust or a local compile on each machine if you use"
-            echo "this release on a compatible x86_64 glibc distro. You **do** still need"
-            echo "runtime libraries: **libva** (+ GPU VA-API drivers), **fuse3**,"
-            echo "Vulkan/Mesa (or GLES), ALSA, and a desktop session with Secret Service."
+            echo "You do **not** need Rust on each machine if you use these artifacts on a"
+            echo "compatible x86_64 glibc distro. You **do** still need runtime libraries:"
+            echo "**libva** (+ GPU VA-API drivers), **fuse3**, Vulkan/Mesa (or GLES), ALSA,"
+            echo "and a desktop session with Secret Service."
             echo
             echo "VA-API hardware decode uses the **machine's** libva drivers at runtime;"
             echo "CI cannot ship GPU drivers."
+            echo
+            echo "Packaging details: \`packaging/linux/PACKAGING.md\`."
             echo
             echo "To publish: tag matching Cargo.toml, e.g. \`git tag v${VERSION} && git push <remote> v${VERSION}\`."
             echo
             echo "Source / build-from-source: see \`LINUX-BUILD.md\`."
           } > "${NOTES}"
-          gh release create "${GITHUB_REF_NAME}"             "${TARBALL}" "${CHECKSUM}"             --title "OpenUUYC ${VERSION} (Linux x86_64)"             --notes-file "${NOTES}"
+          gh release create "${GITHUB_REF_NAME}" \
+            "${TARBALL}" "${CHECKSUM}" \
+            "${APPIMAGE}" "${APPIMAGE_CHECKSUM}" \
+            "${DEB}" "${DEB_CHECKSUM}" \
+            --title "OpenUUYC ${VERSION} (Linux x86_64)" \
+            --notes-file "${NOTES}"

@@ -33,3 +33,10 @@ secrets.json
 !/plugins/examples/
 /plugins/examples/*
 !/plugins/examples/filters.graph.json
+
+# Local package build output (AppImage, deb, staged roots)
+/dist/
+packaging/arch/*.pkg.tar.*
+packaging/arch/pkg/
+packaging/arch/src/
+packaging/arch/*.log

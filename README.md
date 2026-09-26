@@ -9,7 +9,7 @@ This repository ([dytan/openuuyc](https://github.com/dytan/openuuyc)) is a colla
 ## 下载与使用 / Downloads
 
 - **Windows**: download the x64 client from upstream [Releases](https://github.com/djkcyl/openuuyc/releases), run it, sign in (QR or SMS), then connect. The remote device must be running UU Remote.
-- **Linux (this fork)**: prefer a prebuilt controller from this repo's [Releases](https://github.com/dytan/openuuyc/releases) when available (`OpenUUYC-linux-x86_64-<version>.tar.gz`). Extract, install runtime packages (see `INSTALL.txt` in the archive), then `./OpenUUYC gui` or `sudo ./install.sh` for an app-launcher desktop entry. You do **not** need to compile on each machine for the same arch/glibc; you still need runtime libs (libva + GPU drivers, fuse3, Vulkan/Mesa, ALSA). Or [build from source](#build-linux) below.
+- **Linux (this fork)**: prefer a prebuilt controller from this repo's [Releases](https://github.com/dytan/openuuyc/releases) when available — `OpenUUYC-linux-x86_64-<version>.tar.gz`, `.AppImage`, or `.deb` (Arch: build with `packaging/arch/PKGBUILD` / `pacman -U`). Install runtime packages (see `packaging/linux/INSTALL.txt`), then launch `OpenUUYC gui` or use the desktop entry. You do **not** need to compile on each machine for the same arch/glibc; you still need runtime libs (libva + GPU drivers, fuse3, Vulkan/Mesa, ALSA). Packaging notes: [`packaging/linux/PACKAGING.md`](packaging/linux/PACKAGING.md). Or [build from source](#build-linux) below.
 
 ## 功能 / Features (upstream)
 
@@ -47,9 +47,20 @@ Deeper status and postmortems (do not duplicate here):
 
 | Goal | What to do |
 |------|------------|
-| Run the controller | Download a [Release](https://github.com/dytan/openuuyc/releases) tarball (x86_64 glibc). No Rust required. |
+| Run the controller | Download a [Release](https://github.com/dytan/openuuyc/releases) **tarball**, **AppImage**, or **.deb** (x86_64 glibc). Arch/Omarchy: `makepkg` + `pacman -U` via [`packaging/arch/PKGBUILD`](packaging/arch/PKGBUILD). No Rust required for prebuilts. |
 | Contribute / hack | `cargo build` on the machine (needs Rust + build deps). Debug binaries are not portable across distros. |
-| Publish a release | Push tag `v*` matching `Cargo.toml` version to this fork; Actions builds `OpenUUYC-linux-x86_64-<version>.tar.gz`. Or run workflow **Linux release** via `workflow_dispatch` for artifacts only. |
+| Publish a release | Push tag `v*` matching `Cargo.toml` version to this fork; Actions builds tarball + AppImage + `.deb`. Or run workflow **Linux release** via `workflow_dispatch` for artifacts only. |
+
+### Packages (Linux)
+
+| Artifact | Install |
+|----------|---------|
+| `OpenUUYC-x86_64-<ver>.AppImage` | `chmod +x … && ./OpenUUYC-x86_64-<ver>.AppImage` |
+| `openuuyc_<ver>_amd64.deb` | `sudo apt install ./openuuyc_<ver>_amd64.deb` |
+| Arch `.pkg.tar.zst` | `cd packaging/arch && makepkg -f && sudo pacman -U openuuyc-*.pkg.tar.zst` |
+| Tarball | `tar -xzf … && cd … && sudo ./install.sh` (or `PREFIX=$HOME/.local ./install.sh`) |
+
+Details: [`packaging/linux/PACKAGING.md`](packaging/linux/PACKAGING.md) and `INSTALL.txt` inside release archives. Flatpak/rpm not shipped yet.
 
 ### Build (Linux)
 

@@ -1,0 +1,91 @@
+# Maintainer: OpenUUYC Linux packagers <linux-port@local>
+# Build from a git checkout of this repository:
+#   cd packaging/arch && makepkg -f
+# Install:
+#   sudo pacman -U openuuyc-<ver>-<pkgrel>-x86_64.pkg.tar.zst
+#
+# This packages the Linux GUI controller only (not a host/agent).
+# Runtime VA-API / Vulkan GPU drivers stay on the host.
+
+pkgname=openuuyc
+pkgver=0.7.0
+pkgrel=1
+pkgdesc="Native Linux controller for UU Remote (OpenUUYC)"
+arch=('x86_64')
+url="https://github.com/dytan/openuuyc"
+# Project is not released under an OSI open-source license; see LICENSE.
+license=('LicenseRef-OpenUUYC-proprietary')
+depends=(
+  'glibc'
+  'gcc-libs'
+  'libva'
+  'libdrm'
+  'libxcb'
+  'libxau'
+  'libxdmcp'
+  'alsa-lib'
+  'fuse3'
+  'vulkan-icd-loader'
+  'libxkbcommon'
+)
+optdepends=(
+  'mesa: VA-API / Vulkan drivers (AMD/Intel Mesa)'
+  'intel-media-driver: Intel VA-API'
+  'libva-mesa-driver: Mesa VA-API'
+  'vulkan-radeon: AMD Vulkan'
+  'vulkan-intel: Intel Vulkan'
+  'nvidia-utils: NVIDIA Vulkan / related'
+  'noto-fonts-cjk: CJK UI fonts'
+  'gnome-keyring: Secret Service backend'
+  'kwallet: Secret Service backend (KDE)'
+)
+makedepends=(
+  'cargo'
+  'clang'
+  'pkgconf'
+  'openssl'
+  'libx11'
+  'libxi'
+  'libxcursor'
+  'libxrandr'
+  'libxss'
+  'wayland'
+  'wayland-protocols'
+  'mesa'
+  'vulkan-headers'
+  'dbus'
+)
+options=('!lto')
+# Local checkout: no remote source. makepkg runs from packaging/arch/.
+source=()
+sha256sums=()
+
+_reporoot() {
+  cd "${startdir}/../.." && pwd
+}
+
+prepare() {
+  return 0
+}
+
+build() {
+  cd "$(_reporoot)"
+  export CARGO_TERM_COLOR=always
+  if [[ "${OPENUUYC_SKIP_BUILD:-}" == "1" && -x target/release/OpenUUYC ]]; then
+    echo "Skipping cargo build (OPENUUYC_SKIP_BUILD=1, binary present)"
+    return 0
+  fi
+  cargo build --release --locked
+}
+
+package() {
+  cd "$(_reporoot)"
+  DESTDIR="${pkgdir}" PREFIX=/usr OPENUUYC_BIN="${PWD}/target/release/OpenUUYC" \
+    ./packaging/linux/install.sh
+
+  install -Dm644 packaging/linux/INSTALL.txt \
+    "${pkgdir}/usr/share/doc/${pkgname}/INSTALL.txt"
+  if [[ -f LICENSE ]]; then
+    install -Dm644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+  fi
+}

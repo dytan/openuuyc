@@ -126,17 +126,28 @@ This installs the binary onto `PATH`, a `.desktop` entry, and hicolor icons so
 desktop launchers can find **OpenUUYC**. Prebuilt release tarballs ship the same
 `install.sh` at the archive root — see `packaging/linux/INSTALL.txt`.
 
+Other formats (AppImage, `.deb`, Arch `makepkg`): see
+[`packaging/linux/PACKAGING.md`](packaging/linux/PACKAGING.md).
+
 ## CI / prebuilt binaries
 
 GitHub Actions on this fork (`.github/workflows/linux-release.yml`) builds a
-release binary on **Ubuntu 22.04** and packages
-`OpenUUYC-linux-x86_64-<version>.tar.gz` (binary, desktop entry/icons, `install.sh`, `INSTALL.txt`).
+release binary on **Ubuntu 22.04** and packages:
+
+- `OpenUUYC-linux-x86_64-<version>.tar.gz` — binary, desktop/icons, `install.sh`, `INSTALL.txt`
+- `OpenUUYC-x86_64-<version>.AppImage` — portable single-file launcher
+- `openuuyc_<version>_amd64.deb` — Debian/Ubuntu package
+
+Arch packages (`.pkg.tar.zst`) are built on an Arch host with
+`packaging/arch/PKGBUILD` (not on the Ubuntu runner). See
+[`packaging/linux/PACKAGING.md`](packaging/linux/PACKAGING.md).
 
 - **`workflow_dispatch`**: upload Actions artifacts only (no Release).
-- **Push tag `v*`** (e.g. `v0.7.0` matching `Cargo.toml`): create a GitHub Release.
+- **Push tag `v*`** (e.g. `v0.7.0` matching `Cargo.toml`): create a GitHub Release
+  attaching tarball + AppImage + `.deb`.
 
-Consumers on a compatible x86_64 glibc distro can run the binary without a local
+Consumers on a compatible x86_64 glibc distro can run prebuilts without a local
 Rust toolchain. They still need runtime packages (libva + drivers, fuse3,
 Vulkan/Mesa, ALSA — see `packaging/linux/INSTALL.txt`). Debug `cargo build`
-outputs are not portable across distros; use the release artifact or compile on
+outputs are not portable across distros; use a release artifact or compile on
 the target machine for development.
