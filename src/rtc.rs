@@ -569,13 +569,14 @@ async fn send_remote_input(
                     // SCTP binary when KCP is off). OPENUUYC_HID_AS_TEXT=1 still
                     // forces TEXT on the primary path for soak A/B.
                     //
-                    // Dual-send: also push the same JSON as an SCTP string on
-                    // CONTROL (prior soak). Additionally wrap JSON in
-                    // PbPayload::InputEvent and send as protobuf BINARY — the
-                    // oneof exists but was never used; SecureDesktop hosts may
-                    // only honor that domain message. Do not chase PPI framing.
+                    // Windows-only dual-send (SecureDesktop soak): also mirror
+                    // the same JSON as SCTP CONTROL text and as
+                    // PbPayload::InputEvent. macOS hosts (platform 4) honor more
+                    // than one ingress and inject each key twice — keep a single
+                    // primary send there (same as origin/PR1).
                     let as_text = std::env::var_os("OPENUUYC_HID_AS_TEXT")
                         .is_some_and(|v| v != "0" && !v.is_empty());
+                    let windows_dual = mouse.keyboard_platform_code() == 1;
                     let primary = if kcp.is_negotiated() {
                         // send_input honors OPENUUYC_HID_AS_TEXT for KCP PPI.
                         kcp.send_input(
@@ -590,41 +591,43 @@ async fn send_remote_input(
                     } else {
                         send_control_message(&kcp, &channel, payload.clone()).await
                     };
-                    let dual = send_control_text(&channel, payload.clone()).await;
-                    match &dual {
-                        Ok(bytes) => tracing::debug!(
-                            target: "openuuyc::rtc::input",
-                            bytes,
-                            kcp = kcp.is_negotiated(),
-                            "HID dual-send SCTP CONTROL text ok"
-                        ),
-                        Err(error) => tracing::warn!(
-                            target: "openuuyc::rtc::input",
-                            %error,
-                            kcp = kcp.is_negotiated(),
-                            "HID dual-send SCTP CONTROL text failed"
-                        ),
-                    }
-                    let pb_payload =
-                        crate::stream_control::encode_hid_input_event(payload.clone());
-                    let pb = if kcp.is_negotiated() {
-                        kcp.send(channel.id(), pb_payload).await
-                    } else {
-                        send_control_message(&kcp, &channel, pb_payload).await
-                    };
-                    match &pb {
-                        Ok(bytes) => tracing::debug!(
-                            target: "openuuyc::rtc::input",
-                            bytes,
-                            kcp = kcp.is_negotiated(),
-                            "HID protobuf InputEvent dual-send ok"
-                        ),
-                        Err(error) => tracing::warn!(
-                            target: "openuuyc::rtc::input",
-                            %error,
-                            kcp = kcp.is_negotiated(),
-                            "HID protobuf InputEvent dual-send failed"
-                        ),
+                    if windows_dual {
+                        let dual = send_control_text(&channel, payload.clone()).await;
+                        match &dual {
+                            Ok(bytes) => tracing::debug!(
+                                target: "openuuyc::rtc::input",
+                                bytes,
+                                kcp = kcp.is_negotiated(),
+                                "HID dual-send SCTP CONTROL text ok"
+                            ),
+                            Err(error) => tracing::warn!(
+                                target: "openuuyc::rtc::input",
+                                %error,
+                                kcp = kcp.is_negotiated(),
+                                "HID dual-send SCTP CONTROL text failed"
+                            ),
+                        }
+                        let pb_payload =
+                            crate::stream_control::encode_hid_input_event(payload.clone());
+                        let pb = if kcp.is_negotiated() {
+                            kcp.send(channel.id(), pb_payload).await
+                        } else {
+                            send_control_message(&kcp, &channel, pb_payload).await
+                        };
+                        match &pb {
+                            Ok(bytes) => tracing::debug!(
+                                target: "openuuyc::rtc::input",
+                                bytes,
+                                kcp = kcp.is_negotiated(),
+                                "HID protobuf InputEvent dual-send ok"
+                            ),
+                            Err(error) => tracing::warn!(
+                                target: "openuuyc::rtc::input",
+                                %error,
+                                kcp = kcp.is_negotiated(),
+                                "HID protobuf InputEvent dual-send failed"
+                            ),
+                        }
                     }
                     match &primary {
                         Ok(bytes) => tracing::debug!(
@@ -632,6 +635,7 @@ async fn send_remote_input(
                             bytes,
                             kcp = kcp.is_negotiated(),
                             as_text,
+                            windows_dual,
                             "HID primary CONTROL send ok"
                         ),
                         Err(error) => tracing::warn!(
@@ -639,6 +643,7 @@ async fn send_remote_input(
                             %error,
                             kcp = kcp.is_negotiated(),
                             as_text,
+                            windows_dual,
                             "HID primary CONTROL send failed"
                         ),
                     }
@@ -676,13 +681,15 @@ async fn send_remote_input(
             ) {
                 let encoded = event.event.encode();
                 let payload = String::from_utf8_lossy(&encoded);
+                let windows_dual = mouse.keyboard_platform_code() == 1;
                 tracing::info!(
                     target: "openuuyc::viewer::input",
                     kind,
                     %payload,
                     kcp = kcp.is_negotiated(),
-                    dual_sctp_text = true,
-                    dual_pb_input_event = true,
+                    dual_sctp_text = windows_dual,
+                    dual_pb_input_event = windows_dual,
+                    platform = mouse.keyboard_platform_code(),
                     "input submitted to CONTROL"
                 );
             } else {
