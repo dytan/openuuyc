@@ -12,13 +12,13 @@ use std::time::{Duration, Instant};
 
 use tokio_util::sync::CancellationToken;
 
-pub(super) struct Backend {
-    _never: std::convert::Infallible,
-}
+/// Inert: the host annotation overlay is drawn by the Windows host agent.
+#[derive(Default)]
+pub(super) struct Backend;
 
 impl Backend {
     pub fn interval(&self) -> Duration {
-        unreachable!("Windows host only")
+        Duration::from_secs(1)
     }
     pub fn exchange(
         &mut self,

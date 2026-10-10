@@ -28,7 +28,9 @@ mod device_sync;
 mod diagnostics;
 pub(crate) mod notifications;
 
+#[cfg_attr(not(windows), path = "instance_linux.rs")]
 pub mod instance;
+#[cfg_attr(not(windows), path = "maintenance_linux.rs")]
 pub(crate) mod maintenance;
 mod phone;
 mod power;

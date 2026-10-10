@@ -36,14 +36,20 @@ pub(crate) enum DefaultDevices {
 }
 
 impl DefaultDevices {
+    pub const ALL: [Self; 4] = [Self::Keep, Self::Microphone, Self::Speakers, Self::Both];
     pub fn label(self) -> &'static str {
-        unreachable!("Windows host only")
+        match self {
+            Self::Keep => "全部保持原有",
+            Self::Microphone => "仅调整麦克风",
+            Self::Speakers => "仅调整扬声器",
+            Self::Both => "都调整",
+        }
     }
     pub fn microphone(self) -> bool {
-        unreachable!("Windows host only")
+        matches!(self, Self::Microphone | Self::Both)
     }
     pub fn speakers(self) -> bool {
-        unreachable!("Windows host only")
+        matches!(self, Self::Speakers | Self::Both)
     }
 }
 
@@ -55,7 +61,15 @@ pub(crate) struct Device {
 
 impl Device {
     pub fn validate(&self) -> anyhow::Result<()> {
-        crate::platform::linux::unsupported()
+        anyhow::ensure!(
+            !self.id.is_empty()
+                && self.id.len() <= 4096
+                && !self.id.contains('\0')
+                && self.name.len() <= 4096
+                && !self.name.contains('\0'),
+            "播放设备标识无效"
+        );
+        Ok(())
     }
 }
 

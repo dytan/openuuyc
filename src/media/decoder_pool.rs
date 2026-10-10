@@ -312,6 +312,14 @@ impl DecoderPool {
                                 || matches!(self.codec, VideoCodec::H265 | VideoCodec::Av1)
                                     && format.bit_depth_luma == 10)
                     }
+                    // VA-API decodes 4:2:0 H.264/HEVC; the open-time probe asks the
+                    // driver about the exact profile and size.
+                    #[cfg(not(windows))]
+                    DecoderCandidate::LinuxVaapi => {
+                        format.chroma_format_idc == 1
+                            && format.bit_depth_luma == format.bit_depth_chroma
+                            && matches!(self.codec, VideoCodec::H264 | VideoCodec::H265)
+                    }
                     DecoderCandidate::Software => {
                         openuuyc_codec::Format {
                             codec: self.codec,

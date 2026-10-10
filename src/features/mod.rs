@@ -1,6 +1,7 @@
 //! Features ownership and module boundaries.
 
 pub(crate) mod clipboard;
+#[cfg_attr(not(windows), path = "drag_drop_linux.rs")]
 pub(crate) mod drag_drop;
 pub(crate) mod file_transfer;
 pub(crate) mod host;

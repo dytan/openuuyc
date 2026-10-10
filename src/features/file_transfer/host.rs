@@ -1,4 +1,5 @@
 //! Authorized receiving-side file operations. Disk work lives in the user's executor.
+#[cfg(windows)]
 pub(crate) mod agent;
 mod filesystem;
 mod metrics;

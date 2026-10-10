@@ -160,6 +160,7 @@ fn not_link(p: &Path) -> Result<std::fs::Metadata> {
     );
     Ok(m)
 }
+#[cfg(windows)]
 pub(super) fn local_path(value: &str) -> Result<PathBuf> {
     let path = if value == ":/Default" {
         downloads_dir().context("用户下载目录不可用")?
@@ -198,6 +199,33 @@ pub(super) fn local_path(value: &str) -> Result<PathBuf> {
                 m.file_attributes() & 0x400 == 0,
                 "不允许通过重解析点访问文件"
             ),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(result)
+}
+/// Linux: absolute paths only, and no ancestor may be a symlink (the analog of
+/// rejecting Windows reparse points).
+#[cfg(not(windows))]
+pub(super) fn local_path(value: &str) -> Result<PathBuf> {
+    let path = if value == ":/Default" {
+        downloads_dir().context("用户下载目录不可用")?
+    } else {
+        PathBuf::from(value)
+    };
+    ensure!(path.is_absolute(), "仅支持本地磁盘的绝对路径");
+    let mut result = PathBuf::from("/");
+    let tail = path.to_str().context("文件路径无效")?.trim_end_matches('/');
+    let tail = tail.trim_start_matches('/');
+    if !tail.is_empty() {
+        result.push(safe_relative(tail)?);
+    }
+    let mut current = PathBuf::new();
+    for part in result.components() {
+        current.push(part);
+        match std::fs::symlink_metadata(&current) {
+            Ok(m) => ensure!(!m.file_type().is_symlink(), "不允许通过符号链接访问文件"),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
             Err(e) => return Err(e.into()),
         }

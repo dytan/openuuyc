@@ -385,6 +385,10 @@ fn decode_sample(
         ensure!(!cancel.load(Ordering::Acquire), "检查已取消");
         if let Some(frame) = decoder.poll_owned_frame().context("读取解码输出")? {
             let actual = match frame {
+                // Linux GPU frames are uninhabited: VA-API output is read back to CPU.
+                #[cfg(not(windows))]
+                WindowsDecodedFrame::Gpu(frame) => match frame {},
+                #[cfg(windows)]
                 WindowsDecodedFrame::Gpu(frame) => {
                     use windows::Win32::Graphics::{
                         Direct3D11::D3D11_TEXTURE2D_DESC, Dxgi::Common::*,

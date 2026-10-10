@@ -66,6 +66,8 @@ struct DesktopWindow {
     input: egui_winit::State,
     viewport: egui::ViewportInfo,
     close_requested: bool,
+    /// Set by an explicit Exit request: closing must not be vetoed.
+    exiting: bool,
     show_after_present: bool,
     window_move: super::chrome::WindowMoveState,
     window_resize: super::chrome::WindowResizeState,
@@ -122,7 +124,7 @@ impl Runner {
         super::chrome::configure_dwm_window(&window);
         super::branding::set_taskbar_icon(&window);
         if self.root {
-            crate::app::instance::register_window(&window)?;
+            crate::application::app::instance::register_window(&window)?;
         }
         if self.config.centered
             && let Some(monitor) = window.current_monitor()
@@ -178,6 +180,7 @@ impl Runner {
             input,
             viewport,
             close_requested: false,
+            exiting: false,
             show_after_present: self.config.viewport.visible.unwrap_or(true),
             window_move: Default::default(),
             window_resize: Default::default(),
@@ -259,6 +262,7 @@ impl DesktopWindow {
                             &self.window,
                             &self.window.title(),
                             Some(&mut self.window_move),
+                            true,
                         ) {
                             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                         }
@@ -315,7 +319,7 @@ impl DesktopWindow {
         }
         // Both native CloseRequested/Alt+F4 and the custom caption command
         // reach this point before any resources or business windows are closed.
-        if self.close_requested && !self.app.0.on_close_requested() {
+        if self.close_requested && !self.exiting && !self.app.0.on_close_requested() {
             self.close_requested = false;
             self.context.request_repaint();
         }
@@ -534,6 +538,24 @@ impl ApplicationHandler<Event> for Windows {
                 {
                     viewer.runner.user_event(event_loop, Event::Repaint(event));
                 }
+            }
+            Event::Request(Request::ShowMain) => {
+                if let Some(state) = &mut self.main.state {
+                    state.window.set_visible(true);
+                    state.window.set_minimized(false);
+                    state.window.focus_window();
+                    state.context.request_repaint();
+                }
+            }
+            Event::Request(Request::Exit) => {
+                if let Some(state) = &mut self.main.state {
+                    state.exiting = true;
+                    state.close_requested = true;
+                    if let Err(error) = state.render() {
+                        self.main.fail(event_loop, error);
+                    }
+                }
+                self.main.finish_close(event_loop);
             }
             Event::Request(Request::Focus(key)) => self.focus(&key),
             Event::Request(Request::Open {

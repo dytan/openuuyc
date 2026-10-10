@@ -32,7 +32,7 @@ use crate::ui::window_manager::{Event as UiEvent, Repaint as UiRepaintEvent};
 use super::{
     ConnectionProgress, ConnectionProgressApp, DecodedVideoFrame, NativeViewerSession,
     PerformancePanelMode, StreamControlUi, ViewerDisplayHandle, ViewerWindowEvent,
-    configure_viewer_visuals, install_system_cjk_font, mutex_lock, show_stream_control_window,
+    configure_viewer_visuals, mutex_lock, show_stream_control_window,
     take_next_frame,
 };
 
@@ -215,7 +215,7 @@ impl ConnectingWindowsRunner {
         configure_dwm_window(&window);
         let context = egui::Context::default();
         context.set_embed_viewports(true);
-        install_system_cjk_font(&context);
+        crate::ui::fonts::install(&context);
         configure_viewer_visuals(&context);
         let window_id = window.id();
         let proxy = self.proxy.clone();
@@ -284,6 +284,9 @@ impl ConnectingWindowsRunner {
                     self.exit(event_loop);
                     return;
                 }
+                // Audio-only sessions keep the connecting window; Linux has no
+                // dedicated listening layout yet.
+                ViewerWindowEvent::Listening(_) => {}
                 ViewerWindowEvent::Playing(session) => {
                     let Some(window) = self.window.clone() else {
                         return;
@@ -360,7 +363,7 @@ impl ConnectingWindowsRunner {
                 title_bar_panel(ui, "player-window-chrome", title_bar_height(), |ui| {
                     let bar = ui.available_rect_before_wrap();
                     close_requested |=
-                        window_title_bar(ui, &window, &title, Some(&mut shell.move_state));
+                        window_title_bar(ui, &window, &title, Some(&mut shell.move_state), true);
                     if let Stage::Playing(player) = stage {
                         player.title_bar_controls(ui, bar, &window);
                     }
@@ -610,8 +613,6 @@ struct Player {
     scale: f32,
     /// Last failure from a control request, shown next to the toolbar.
     control_error: Option<String>,
-    /// The panel size the caption button restores; the stream menu picks it.
-    performance_restore: PerformancePanelMode,
     /// The remote cursor shape, decoded once per distinct image.
     cursor: Option<(usize, egui::TextureHandle, [u32; 2], [u32; 2])>,
     /// Whether the pointer is currently locked to the window for raw motion.
@@ -636,12 +637,13 @@ impl Player {
         session.ensure_running()?;
         let owner = u64::from(window.id());
         let wake = FrameWakeBridge::install(&session, proxy, window.id())?;
+        let performance_mode = session.stream_control.device_preferences().performance_mode;
         Ok(Self {
             session,
             wake,
             owner,
             stream_control_ui: StreamControlUi::default(),
-            performance_mode: PerformancePanelMode::Hidden,
+            performance_mode,
             intercept_shortcuts: true,
             current: None,
             video_size: None,
@@ -654,7 +656,6 @@ impl Player {
             physical_buttons: 0,
             scale: window.scale_factor() as f32,
             control_error: None,
-            performance_restore: PerformancePanelMode::Compact,
             cursor: None,
             pointer_locked: false,
             focused: true,
@@ -676,7 +677,7 @@ impl Player {
     fn poll(&mut self) -> Result<bool> {
         self.confirm_neutral();
         self.session.ensure_running()?;
-        Ok(!mutex_lock(&self.session.frame_queue).is_empty())
+        Ok(mutex_lock(&self.session.frame_queue).is_some())
     }
 
     /// Take the newest decoded frame, dropping anything the UI cadence skipped.
@@ -770,6 +771,11 @@ impl Player {
         let snapshot = self.session.performance.snapshot();
         let mut view = super::stream_menu::LocalViewSettings {
             performance_mode: self.performance_mode,
+            performance_always_visible: self
+                .session
+                .stream_control
+                .device_preferences()
+                .performance_always_visible,
             intercept_shortcuts: self.intercept_shortcuts,
             send_ctrl_alt_del: false,
         };
@@ -783,7 +789,15 @@ impl Player {
             screen_id,
             display_size,
         );
-        self.performance_mode = view.performance_mode;
+        if self.performance_mode != view.performance_mode {
+            self.session
+                .stream_control
+                .set_performance_mode(view.performance_mode);
+            self.performance_mode = view.performance_mode;
+        }
+        self.session
+            .stream_control
+            .set_performance_always_visible(view.performance_always_visible);
         self.intercept_shortcuts = view.intercept_shortcuts;
         if view.send_ctrl_alt_del {
             let _ = self
@@ -792,14 +806,16 @@ impl Player {
                 .mouse()
                 .send_ctrl_alt_del(self.owner);
         }
-        if self.performance_mode != PerformancePanelMode::Hidden {
-            super::performance_panel::show(
-                ui.ctx(),
-                &self.session.performance,
-                &snapshot,
-                "linux-player",
-            );
-        }
+        // Health alerts always show; the panel follows "性能监控常驻".
+        super::show_performance_overlay(
+            ui.ctx(),
+            &self.session.performance,
+            &self.session.stream_control.audio(),
+            view.performance_mode,
+            view.performance_always_visible,
+            ui.max_rect(),
+            "linux-player",
+        );
         self.update_pointer_lock(window);
         self.draw_remote_cursor(ui, window);
         placement
@@ -954,19 +970,24 @@ impl Player {
         }
         if row
             .selectable_label(
-                self.performance_mode != PerformancePanelMode::Hidden,
+                self.session
+                    .stream_control
+                    .device_preferences()
+                    .performance_always_visible,
                 "性能",
             )
             .clicked()
         {
             // A caption button shows or hides; the stream menu chooses between
             // the compact and detailed panels.
-            self.performance_mode = if self.performance_mode == PerformancePanelMode::Hidden {
-                self.performance_restore
-            } else {
-                self.performance_restore = self.performance_mode;
-                PerformancePanelMode::Hidden
-            };
+            let visible = self
+                .session
+                .stream_control
+                .device_preferences()
+                .performance_always_visible;
+            self.session
+                .stream_control
+                .set_performance_always_visible(!visible);
         }
         if row.button("串流设置").clicked() {
             self.stream_control_ui.open = !self.stream_control_ui.open;
@@ -1268,7 +1289,15 @@ impl Player {
                 self.session.close_handle().close();
             }
             ViewerShortcut::Performance => {
-                self.performance_mode = self.performance_mode.next();
+                self.performance_mode = self
+                    .session
+                    .stream_control
+                    .device_preferences()
+                    .performance_mode
+                    .next();
+                self.session
+                    .stream_control
+                    .set_performance_mode(self.performance_mode);
             }
         }
     }

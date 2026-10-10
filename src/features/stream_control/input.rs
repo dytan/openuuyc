@@ -82,6 +82,13 @@ impl StreamControlHandle {
         self.cursor.hidden()
     }
 
+    /// Whether the host currently streams its cursor; the Linux player draws the
+    /// remote cursor image only while capture is on.
+    #[cfg(not(windows))]
+    pub(crate) fn remote_cursor_captured(&self) -> bool {
+        lock(&self.shared).baseline.cursor_capture
+    }
+
     pub fn set_mouse_mode(&self, mode: MouseMode) -> Result<()> {
         self.change_mouse_mode(mode, true)
     }

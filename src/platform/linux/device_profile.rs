@@ -164,3 +164,22 @@ impl Hardware {
         Ok(value)
     }
 }
+
+/// Wallpaper publication is part of the Windows host profile.
+#[derive(Clone, PartialEq, Eq)]
+pub(crate) struct WallpaperSource {
+    pub path: std::path::PathBuf,
+    pub modified: std::time::SystemTime,
+    pub length: u64,
+}
+impl WallpaperSource {
+    pub(crate) fn cached(&self) -> bool {
+        false
+    }
+}
+pub(crate) fn wallpaper_source() -> Result<WallpaperSource> {
+    anyhow::bail!("Linux 暂不支持上报设备壁纸")
+}
+pub(crate) fn wallpaper_image(_source: &WallpaperSource) -> Result<Vec<u8>> {
+    anyhow::bail!("Linux 暂不支持上报设备壁纸")
+}

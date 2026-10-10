@@ -1,6 +1,7 @@
 //! Application ownership and module boundaries.
 
 pub mod app;
+#[cfg_attr(not(windows), path = "bootstrap_linux.rs")]
 pub mod bootstrap;
 pub mod viewer;
 pub(crate) mod viewer_shortcuts;

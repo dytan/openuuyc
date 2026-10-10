@@ -55,6 +55,10 @@ pub(crate) enum DecodedSurface {
 pub(crate) enum RenderSurface {
     CpuRgba8(Vec<Rgba8>),
 
+    /// Linux uploads NV12 planes and converts on the GPU (wgpu shader).
+    #[cfg(not(windows))]
+    CpuNv12 { data: Bytes, color: RenderColor },
+
     D3D11(windows_surface::D3D11Surface),
 }
 
@@ -75,6 +79,12 @@ impl DecodedSurface {
             Self::CpuI444(data) => {
                 i444_to_rgba_pixels(width, height, &data, color).map(RenderSurface::CpuRgba8)
             }
+            #[cfg(not(windows))]
+            Self::CpuNv12(data) => {
+                let _ = (width, height);
+                Ok(RenderSurface::CpuNv12 { data, color })
+            }
+            #[cfg(windows)]
             Self::CpuNv12(data) => {
                 nv12_to_rgba_pixels(width, height, &data, color).map(RenderSurface::CpuRgba8)
             }
@@ -240,6 +250,9 @@ impl NativeVideoDecoder {
         let depth = format.map_or(8, |f| f.bit_depth_luma);
         let chroma = format.map_or(1, |f| f.chroma_format_idc);
         match candidate {
+            #[cfg(not(windows))]
+            DecoderCandidate::WindowsD3d11 { .. } => Err(DecodeError::Unsupported.into()),
+            #[cfg(windows)]
             DecoderCandidate::WindowsD3d11 { adapter } => {
                 let supports = |writer: &windows_surface::D3D11SurfaceWriter| {
                     WindowsVideoDecoder::probe_format(

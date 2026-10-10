@@ -15,6 +15,7 @@ pub(crate) mod desktop;
 pub(crate) mod displays;
 mod encoding_settings;
 mod fec;
+#[cfg_attr(not(windows), path = "files_linux.rs")]
 pub(crate) mod files;
 pub(crate) mod format;
 mod hevc;

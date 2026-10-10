@@ -87,10 +87,35 @@ impl ActivePresence {
 }
 
 // This mutex is never acquired: its HANDLE only reserves the object name.
+#[cfg(windows)]
 struct Reservation {
     _handle: crate::platform::windows::host_service::pipe::Handle,
 }
+#[cfg(windows)]
 unsafe impl Send for Reservation {}
+
+/// Linux reserves the presence room with an advisory lock held for the
+/// lifetime of the file handle; the kernel drops it if the process dies.
+#[cfg(not(windows))]
+struct Reservation {
+    _lock: std::fs::File,
+}
+#[cfg(not(windows))]
+impl Reservation {
+    fn try_acquire(key: &str) -> Result<Option<Self>> {
+        let stem: String = key
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect();
+        let path = crate::paths::session_lock_path(&format!("presence-{stem}"));
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)?;
+        Ok(file.try_lock().is_ok().then_some(Self { _lock: file }))
+    }
+}
 
 async fn run_presence(
     client: HostClient,
@@ -100,6 +125,7 @@ async fn run_presence(
     // Reservation lifetime (not mutex thread ownership) spans the whole room.
     // During installation the new background waits for the portable room's
     // normal close; two account owners must never kick each other off the server.
+    #[cfg(windows)]
     let _owner = loop {
         use windows::{
             Win32::{
@@ -121,6 +147,13 @@ async fn run_presence(
             break handle;
         }
         drop(handle);
+        tokio::select! { _ = task_cancel.cancelled() => return Ok(()), _ = tokio::time::sleep(Duration::from_millis(100)) => () }
+    };
+    #[cfg(not(windows))]
+    let _owner = loop {
+        if let Some(reservation) = Reservation::try_acquire(&client.presence_key())? {
+            break reservation;
+        }
         tokio::select! { _ = task_cancel.cancelled() => return Ok(()), _ = tokio::time::sleep(Duration::from_millis(100)) => () }
     };
     let _assistance = crate::features::host::assist::Running::start(client.clone());

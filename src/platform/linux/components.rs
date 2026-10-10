@@ -15,6 +15,12 @@ pub enum Kind {
     DisplayDriver,
     AudioDriver,
 }
+impl Kind {
+    /// Driver signing certificates are Windows-only.
+    pub(crate) fn certificate(self) -> Option<(&'static str, &'static str, &'static [u8])> {
+        None
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum Operation {
     Install,
