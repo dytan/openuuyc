@@ -2,104 +2,70 @@
 
 ![OpenUUYC](assets/banner.png)
 
-OpenUUYC 是用 Rust 编写的 UU 远程第三方客户端。使用已有的 UU 账号登录，连接和控制远端设备。
+OpenUUYC 是用 Rust 编写的 UU 远程第三方 Windows 客户端，支持主控、被控和远程协助。
 
-This repository ([dytan/openuuyc](https://github.com/dytan/openuuyc)) is a collaboration fork that adds a **native Linux controller** (viewer/controller only — not a Linux host/agent). Windows support from upstream is unchanged.
+Windows 1.0 已进入 **RC** 阶段，重点完善兼容性、恢复和稳定性。**Windows 正式版完成后会适配 Linux 等其他平台。** 提前移植建议先通过 [Issue](https://github.com/djkcyl/openuuyc/issues) 沟通。
 
-## 下载与使用 / Downloads
+## 下载与使用
 
-- **Windows**: download the x64 client from upstream [Releases](https://github.com/djkcyl/openuuyc/releases), run it, sign in (QR or SMS), then connect. The remote device must be running UU Remote.
-- **Linux (this fork)**: prefer a prebuilt controller from this repo's [Releases](https://github.com/dytan/openuuyc/releases) when available — `OpenUUYC-linux-x86_64-<version>.tar.gz`, `.AppImage`, or `.deb` (Arch: build with `packaging/arch/PKGBUILD` / `pacman -U`). Install runtime packages (see `packaging/linux/INSTALL.txt`), then launch `OpenUUYC gui` or use the desktop entry. You do **not** need to compile on each machine for the same arch/glibc; you still need runtime libs (libva + GPU drivers, fuse3, Vulkan/Mesa, ALSA). Packaging notes: [`packaging/linux/PACKAGING.md`](packaging/linux/PACKAGING.md). Or [build from source](#build-linux) below.
+从 [Releases](https://github.com/djkcyl/openuuyc/releases) 下载 Windows x64 客户端，扫码或短信登录后连接设备，支持 UU 官方客户端；无需登录也可在登录页开启“接受远程协助”。
 
-## 功能 / Features (upstream)
+最新稳定版为 [v0.7.0](https://github.com/djkcyl/openuuyc/releases/tag/v0.7.0)，最新预发布为 [v1.0.0-rc.2](https://github.com/djkcyl/openuuyc/releases/tag/v1.0.0-rc.2)。
 
-- **设备管理**：设备列表与详情、修改别名、远程开关机和重启；支持通过设备 ID 连接，以及最近连接和收藏。
-- **远程控制**：键鼠操作、多种鼠标模式、自定义快捷键和设备快速切换。
-- **麦克风**：将本机麦克风发送到远端 Windows 设备。
-- **文件传输**：双栏浏览、文件和文件夹双向传输。
-- **剪贴板同步**：文字、图片及文件复制粘贴。
-- **端口转发**、**多显示器**、**画质设置**、**批注**、**插件**：见上游说明；具体以所用版本为准。
+接收测试版更新提醒：在“关于”中开启“允许测试版”（默认关闭）。
 
-目前支持 **Windows x64** 与 **Linux x64 控制器**；暂不支持本机被控（Linux host）。具体功能以所用版本的 Release / 本分支文档为准。
+**从 alpha.6 或更早版本升级需重新登录，设备 ID 会改变，旧设备条目需手动删除。**
 
-## Linux controller (this fork)
+## 能力表
 
-Native Linux GUI controller built on egui + winit. Highlights that exist on this branch:
+以下对应 **v1.0.0-rc.2**，功能取决于双方能力与权限。
 
-| Area | Status |
-|------|--------|
-| GUI shell | **wgpu** present (Vulkan / GLES) |
-| Video decode | **VA-API H.264** and **VA-API H.265/HEVC Main** (8-bit 4:2:0 NV12) when the driver exposes VLD; **Rust H.264 software** fallback. Main10 / 4:4:4 are not advertised (no NV12-compatible readback yet). If HEVC VA-API is unavailable, capability negotiation falls back toward H.264 |
-| Fonts / UI | Noto Sans CJK SC (TTC face index 2) and related candidates |
-| Connect options | `gui` flags for codec, hardware decode, transport, auto mouse control, clipboard files |
-| Clipboard | **arboard** text/image + **FUSE** file offer (`clipboard_files`) |
-| Lock / SecureDesktop | SecureDesktop-aware HID + CAD path; decoder **unpark after present** so lock UI stays live |
-| Auth / paths | Secret Service (keyring); XDG data under `~/.local/share/openuuyc` (or `$XDG_DATA_HOME/openuuyc`); session flock under `$XDG_RUNTIME_DIR` |
+| 功能 | 主控端 | 被控端 | 说明 |
+| --- | --- | --- | --- |
+| 同账号远程连接 | 支持同时连接多台设备 | 支持 | 本机在连接设置中开启“允许被控” |
+| 设备 ID / 验证码协助 | 支持主动连接 | 支持账号及游客协助 | 随机 / 自定义密码、本机确认；主控支持最近连接和收藏 |
+| 画面传输 | 接收与播放 | 采集与编码 | H.264 / H.265 / AV1、真彩及 HDR，可调画质、码率和帧率；AV1 与 SDR 自动 10 位需双方 OpenUUYC 支持 |
+| 编解码 | DXVA11 硬解 / Rust 软解 | NVENC、AMF、QSV 硬编 / Rust H.264 软编 | 可选格式与显卡首选；软解支持 H.264 / AV1，整个客户端最多一个软解播放窗口 |
+| 键鼠与触摸 | 键盘、鼠标控制 | 键鼠及移动端原生触摸接收 | 相对/绝对鼠标、组合键、光标同步；可选 125 / 500 / 1000 Hz 鼠标节流（默认关闭） |
+| 多显示器与显示设置 | 切屏、多窗口、分辨率及 DPI 调整 | 多屏采集与设置接收 | 屏幕标签可拖出独立窗口，显示设置按目标支持的配置应用 |
+| 虚拟屏、超级屏与无屏接管 | 支持操作远端 | 支持 | 需安装显示驱动；自动兜底屏断线保留，其他可用屏幕接入后回收 |
+| 桌面声音 | 播放与远程音质调整 | 采集与发送 | 默认或指定设备，设备变化后恢复；64 / 128 / 192 / 256 kbps，远程调音质需双方 alpha.6+ |
+| 仅音频连接 | 支持 | 支持 | 默认 256 kbps，提供波形、电平、网络 RTT、精简模式，可恢复画面 |
+| 麦克风与虚拟声卡 | 选择麦克风、调整音质并发送 | 虚拟扬声器及远程麦克风接收 | 被控端需选装虚拟音频驱动，可配置默认音频设备切换策略 |
+| 剪贴板与文件拖放 | 支持 | 支持 | 文字、富文本、图片及文件复制；OpenUUYC 双端支持双向拖放，与官方端连接时使用其支持的发送方式 |
+| 独立文件传输 | 支持 | 支持官方 Windows / Android / iOS 收发 | 目录浏览、收发、文件管理及暂停续传；被控端需登录 Windows |
+| 端口转发 | 支持 | 支持 | TCP 与官方互通；UDP 需两端 OpenUUYC，复用可靠通道；被控需开启许可 |
+| 批注与指示工具 | 支持发送 | 支持接收 | 画笔、形状、撤销重做、白板、激光笔和鼠标指示；被控端需登录 Windows |
+| 远程电源操作 | 开机、关机和重启 | 关机、重启、远程开机设置与局域网唤醒协助 | 提供有线网卡检查/配置；WoL 需 BIOS 开启及同网协助设备或已配置的 UU 路由器 |
 
-Deeper status and postmortems (do not duplicate here):
+被控通知可选程序浮窗或 Windows 通知，支持连接确认、断开及文件收发提醒。
 
-- [`LINUX.md`](LINUX.md) — status overview
-- [`LINUX-BUILD.md`](LINUX-BUILD.md) — distro package lists and build notes
-- [`docs/linux-clipboard-fuse.md`](docs/linux-clipboard-fuse.md) — FUSE / clipboard verify
-- [`docs/linux-lock-video-freeze.md`](docs/linux-lock-video-freeze.md) — lock-screen freeze fix
+向官方被控端拖入文件，需开启键鼠控制、剪贴板同步和文件复制。
 
-### Prebuilt vs build-from-source
+另支持设备管理、自定义快捷键、本机诊断、性能监控、异常图标及[插件和节点图](plugins/README.md)。
 
-| Goal | What to do |
-|------|------------|
-| Run the controller | Download a [Release](https://github.com/dytan/openuuyc/releases) **tarball**, **AppImage**, or **.deb** (x86_64 glibc). Arch/Omarchy: `makepkg` + `pacman -U` via [`packaging/arch/PKGBUILD`](packaging/arch/PKGBUILD). No Rust required for prebuilts. |
-| Contribute / hack | `cargo build` on the machine (needs Rust + build deps). Debug binaries are not portable across distros. |
-| Publish a release | Push tag `v*` matching `Cargo.toml` version to this fork; Actions builds tarball + AppImage + `.deb`. Or run workflow **Linux release** via `workflow_dispatch` for artifacts only. |
+支持本机导出及远端获取脱敏诊断包（ZIP / zstd，最多 32 MiB）；远端获取需双方 beta.3+，并开启被控端文件访问权限。
 
-### Packages (Linux)
+## 安装与服务
 
-| Artifact | Install |
-|----------|---------|
-| `OpenUUYC-x86_64-<ver>.AppImage` | `chmod +x … && ./OpenUUYC-x86_64-<ver>.AppImage` |
-| `openuuyc_<ver>_amd64.deb` | `sudo apt install ./openuuyc_<ver>_amd64.deb` |
-| Arch `.pkg.tar.zst` | `cd packaging/arch && makepkg -f && sudo pacman -U openuuyc-*.pkg.tar.zst` |
-| Tarball | `tar -xzf … && cd … && sudo ./install.sh` (or `PREFIX=$HOME/.local ./install.sh`) |
+主页“安装服务”会将程序安装到 `Program Files\OpenUUYC`，安装后台服务、输入和显示驱动，创建快捷方式并配置托盘自启动。安装需管理员授权及驱动证书信任；关闭主窗口进入托盘，托盘“退出”结束运行。
 
-Details: [`packaging/linux/PACKAGING.md`](packaging/linux/PACKAGING.md) and `INSTALL.txt` inside release archives. Flatpak/rpm not shipped yet.
+安装服务并开启被控后，支持锁屏、PIN 界面及重启后未登录 Windows 时接入。
 
-### Build (Linux)
+更新时运行新版 EXE，点击“更新并打开”即可更新已有安装。虚拟声卡在“连接设置 → 服务管理”中选装；卸载可选择保留虚拟显示驱动、虚拟声卡及用户数据。
 
-Needs Rust stable and a C/C++ toolchain, plus X11/Wayland, Vulkan/Mesa, **libva**, **fuse3**, and CJK fonts. Distro-specific package lists: [`LINUX-BUILD.md`](LINUX-BUILD.md).
+### 虚拟音频驱动的使用条件
 
-```bash
-git clone https://github.com/dytan/openuuyc.git
-cd openuuyc
-cargo build                 # debug → target/debug/OpenUUYC
-cargo build --release       # release → target/release/OpenUUYC
-```
+**虚拟音频驱动使用测试签名，尚未取得 Microsoft 正式签名。** 使用虚拟扬声器或接收远程麦克风，需要手动准备测试启动环境；普通画面、键鼠和桌面声音不需要此设置。
 
-CI release builds use Ubuntu 22.04 (see [`.github/workflows/linux-release.yml`](.github/workflows/linux-release.yml)). VA-API still needs **local** libva drivers at runtime; the CI binary does not embed GPU drivers.
+- 临时测试：Shift + 重启 → 疑难解答 → 高级选项 → 启动设置 → 重启 → **7 / F7 禁用驱动程序强制签名**，仅本次启动有效。[Windows 说明](https://support.microsoft.com/en-us/windows/experience/startup-boot/windows-startup-settings)
+- 持续测试：管理员执行 `bcdedit /set testsigning on` 后重启；恢复时执行 `bcdedit /set testsigning off` 并重启。Secure Boot、BitLocker 或组织策略可能限制操作。[微软说明](https://learn.microsoft.com/en-us/windows-hardware/drivers/install/the-testsigning-boot-configuration-option)
 
-### Run (Linux)
+测试启动会降低驱动加载保护，程序不会自动修改这些设置。
 
-```bash
-./target/debug/OpenUUYC gui \
-  --codec h264 \
-  --hardware-decode true \
-  --transport auto \
-  --auto-mouse-control true
+## 构建
 
-# Force software H.264:
-./target/debug/OpenUUYC gui --codec h264 --hardware-decode false
-
-# Enable clipboard file copy by default (also available in the player menu):
-./target/debug/OpenUUYC gui --clipboard-files true
-
-./target/debug/OpenUUYC gui --help
-```
-
-Logs (rotated): `~/.local/share/openuuyc/logs/` (or `$XDG_DATA_HOME/openuuyc/logs/`). Override with `--log-file`.
-
-Linux needs a D-Bus user session and an unlocked Secret Service (e.g. gnome-keyring / KWallet). Ensure `DBUS_SESSION_BUS_ADDRESS` is set in the session you launch from.
-
-### Windows build (upstream)
-
-Needs Rust stable (MSVC), Visual Studio C++ build tools, Windows SDK, CMake, and UPX on `PATH`:
+需要 Rust stable（MSVC）、Visual Studio C++ 构建工具、Windows SDK、CMake 和 NASM，命令行工具需加入 PATH。H.264 软件编解码和 AV1 软件解码使用项目 Rust 核心及 SIMD 汇编。
 
 ```powershell
 git clone https://github.com/djkcyl/openuuyc.git
@@ -107,23 +73,18 @@ cd openuuyc
 cargo dist
 ```
 
-Binaries land under `target/dist/upx/`. See `--help` on the binary for CLI usage.
+产物为 `target/dist/` 下的单文件 EXE。仅构建原生 EXE 可用 `cargo dist --native`；命令行参数见 `--help`。
 
-## Credits / 致谢
+源码已包含签名驱动包和公钥证书，构建主程序不需要签名私钥。修改驱动及发布前验证见 [驱动构建说明](drivers/README.md)。
 
-- Original project: [djkcyl/openuuyc](https://github.com/djkcyl/openuuyc)
-- Linux port foundation: [DoyoDia](https://github.com/DoyoDia) — [PR #1 (linux-port)](https://github.com/djkcyl/openuuyc/pull/1) on upstream (`feat: Linux 客户端移植与 VA-API 硬件解码`)
+## 命令行更新
 
-This fork continues that Linux controller work (wgpu present, VA-API + software fallback, clipboard FUSE parity, SecureDesktop / decoder-unpark fixes, docs). Windows `cfg` paths are intentionally left intact.
+从新下载的程序包运行 `OpenUUYC.exe update --silent`，静默更新已有安装。会中断当前连接，完成后不自动打开控制中心或重启 Windows；非管理员运行时仍需确认系统 UAC。
 
-## 反馈与许可 / Feedback and license
+无人值守脚本使用 `update --silent --no-elevate`，由安装所属用户的管理员终端执行；权限不足返回 740，不弹 UAC。退出码：0 成功、3010 需重启、170 已有安装操作、1605 未安装、2404 驱动占用，其他失败为 1。不要同时保留其他更新窗口。
 
-Issues and suggestions: upstream [Issues](https://github.com/djkcyl/openuuyc/issues) (or this fork’s Issues for Linux-controller work). When reporting bugs, include version, steps, and relevant logs — strip account credentials, verification codes, and other private data.
+## 反馈与许可
 
-**OpenUUYC is not a NetEase official project.** Source is published, but **the project as a whole is not released under an open-source license** (not MIT/Apache/GPL/AGPL). Per [LICENSE](LICENSE):
+问题和建议请提交到 [Issues](https://github.com/djkcyl/openuuyc/issues)。报告问题时附上双方版本、操作步骤、大致发生时间及导出的诊断包，分享前检查是否含私人信息。
 
-- Rights in original project material that the rightsholders may license are **reserved** except where law, existing licenses, written authorization, or LICENSE §4 apply. Visibility of the source alone does **not** grant permission to use, copy, modify, distribute, sublicense, sell, or commercially exploit that original material.
-- **Third-party** code and derivatives remain under **their own** licenses (see [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES)); those terms take precedence in their scope. The tree includes FFmpeg-derived Rust code under **LGPL-2.1-or-later**, with LICENSE §4 stating the LGPL §6-style modification / reverse-engineering / relink allowances for combined programs.
-- This notice grants **no** right to use NetEase / UU Remote services, bypass auth, or control a device without authorization from the person entitled to control it.
-
-Forks and redistributors must read [LICENSE](LICENSE) and fulfill third-party obligations themselves. Do not assume rights we do not have.
+OpenUUYC 非网易官方项目。源码公开，但项目整体未采用开源许可证，使用与分发条件见 [LICENSE](LICENSE)。第三方及派生代码保留各自的许可，详见 [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES)。

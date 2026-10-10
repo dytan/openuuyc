@@ -94,6 +94,13 @@ pub struct RTCDataChannel {
 }
 
 impl RTCDataChannel {
+    // An accepted in-band DCEP channel is not locally allocated and is not an
+    // out-of-band negotiated channel. Publish its actual stream ID before the
+    // application's on_data_channel/on_open callbacks can route messages.
+    pub(crate) fn set_remote_id(&self, id: u16) {
+        self.id.store(id, Ordering::SeqCst);
+    }
+
     // create the DataChannel object before the networking is set up.
     pub(crate) fn new(params: DataChannelParameters, setting_engine: Arc<SettingEngine>) -> Self {
         // the id value if non-negotiated doesn't matter, since it will be overwritten
@@ -547,6 +554,32 @@ impl RTCDataChannel {
             dc.buffered_amount()
         } else {
             0
+        }
+    }
+
+    /// Admission watermark for latency-sensitive ordered data. This includes
+    /// gap-ACKed messages still blocked by a missing earlier message on the
+    /// same stream; ordinary buffered_amount keeps its standard SACK semantics.
+    pub async fn wait_input_capacity(&self, limit: usize) -> Result<()> {
+        let closed = self.notify_tx.notified();
+        tokio::pin!(closed);
+        closed.as_mut().enable();
+        self.ensure_open()?;
+        let transport = self
+            .sctp_transport
+            .lock()
+            .await
+            .as_ref()
+            .and_then(Weak::upgrade)
+            .ok_or(Error::ErrClosedPipe)?;
+        let association = transport.association().await.ok_or(Error::ErrClosedPipe)?;
+        tokio::select! {
+            biased;
+            _ = closed => Err(Error::ErrClosedPipe),
+            result = association.wait_stream_input_capacity(self.id(), limit) => {
+                result?;
+                self.ensure_open()
+            }
         }
     }
 

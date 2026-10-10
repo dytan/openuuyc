@@ -80,7 +80,7 @@ impl Manifest {
     }
 }
 pub(crate) fn root() -> Result<PathBuf> {
-    let adjacent = std::env::current_exe()?
+    let adjacent = crate::application::bootstrap::resource_origin().unwrap_or(std::env::current_exe()?)
         .parent()
         .context("missing executable directory")?
         .join("plugins");
@@ -88,7 +88,7 @@ pub(crate) fn root() -> Result<PathBuf> {
         return Ok(adjacent);
     }
     Ok(
-        crate::paths::app_data_dir().context("app data directory unavailable")?
+        PathBuf::from(std::env::var_os("LOCALAPPDATA").context("LOCALAPPDATA unavailable")?)
             .join("OpenUUYC/plugins"),
     )
 }

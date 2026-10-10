@@ -532,6 +532,14 @@ impl Association {
                         }
                         let raw = buf.as_ref();
                         if let Err(err) = net_conn.send(raw.as_ref()).await {
+                            if err.is_ice_path_unavailable() {
+                                // ICE owns path validation and switching. This
+                                // datagram was lost; SCTP's existing timers own
+                                // retransmission, not a new association/queue.
+                                buf.clear();
+                                buffer = Some(buf);
+                                continue;
+                            }
                             log::warn!("[{name2}] failed to write packets on net_conn: {err}");
                             done2.store(true, Ordering::Relaxed);
                             break 'outer;
@@ -616,6 +624,32 @@ impl Association {
     ) -> Result<Arc<Stream>> {
         let mut ai = self.association_internal.lock().await;
         ai.open_stream(stream_identifier, default_payload_type)
+    }
+
+    /// Wait for room without treating selective ACK of later ordered messages
+    /// as proof that they can be delivered past an earlier hole on this stream.
+    pub async fn wait_stream_input_capacity(&self, stream_id: u16, limit: usize) -> Result<()> {
+        let changed = self
+            .association_internal
+            .lock()
+            .await
+            .input_credit_changed
+            .clone();
+        loop {
+            let notified = changed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self
+                .association_internal
+                .lock()
+                .await
+                .input_pending_bytes(stream_id)?
+                < limit
+            {
+                return Ok(());
+            }
+            notified.await;
+        }
     }
 
     /// accept_stream accepts a stream

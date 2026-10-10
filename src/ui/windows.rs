@@ -1,7 +1,7 @@
 use super::d3d11::UiPresenter;
 use super::window_manager::{self, Event, Repaint, Request};
 use super::{AppFactory, AppSession, WindowConfig};
-use crate::viewer::windows_presenter::ConnectingWindowsRunner;
+use crate::application::viewer::windows_presenter::ConnectingWindowsRunner;
 use anyhow::{Context, Result, anyhow, bail};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -22,9 +22,9 @@ use winit::window::{Window, WindowId};
 
 pub(super) fn run(config: WindowConfig, factory: AppFactory) -> Result<()> {
     let mut builder = EventLoop::<Event>::with_user_event();
-    builder.with_msg_hook(crate::viewer::desktop_input_message);
+    builder.with_msg_hook(crate::application::viewer::desktop_input_message);
     let event_loop = builder.build().context("create desktop event loop")?;
-    let _input_hook = crate::viewer::desktop_input_hook()?;
+    let _input_hook = crate::application::viewer::desktop_input_hook()?;
     let mut runner = Windows {
         main: Runner {
             config,
@@ -43,7 +43,7 @@ pub(super) fn run(config: WindowConfig, factory: AppFactory) -> Result<()> {
         .run_app(&mut runner)
         .context("run D3D11 desktop event loop")?;
     window_manager::install(None);
-    crate::clipboard::shutdown();
+    crate::features::clipboard::shutdown();
     if let Some(error) = runner.main.error.take() {
         bail!(error);
     }
@@ -69,7 +69,10 @@ struct DesktopWindow {
     input: egui_winit::State,
     viewport: egui::ViewportInfo,
     close_requested: bool,
+    tray: Option<super::tray::Tray>,
+    exiting: bool,
     show_after_present: bool,
+    focus_after_present: bool,
     window_move: super::chrome::WindowMoveState,
     window_resize: super::chrome::WindowResizeState,
     min_inner_size: Option<egui::Vec2>,
@@ -77,6 +80,7 @@ struct DesktopWindow {
     last_frame: Option<Instant>,
     interval: Duration,
     window: Window,
+    notification: Option<crate::platform::windows::notifications::Placement>,
 }
 
 impl Drop for DesktopWindow {
@@ -102,11 +106,16 @@ impl Runner {
             return Ok(());
         }
         let context = egui::Context::default();
+        super::fonts::install(&context);
         context.set_embed_viewports(true);
         // WindowConfig sizes describe page content; the shared caption occupies
         // client space now, so preserve the page's requested and minimum size.
         let mut viewport_builder = self.config.viewport.clone();
-        let caption_height = super::chrome::title_bar_height();
+        let caption_height = if self.config.notification {
+            0.0
+        } else {
+            super::chrome::title_bar_height()
+        };
         if let Some(size) = &mut viewport_builder.inner_size {
             size.y += caption_height;
         }
@@ -124,9 +133,13 @@ impl Runner {
         )?;
         super::chrome::configure_dwm_window(&window);
         super::branding::set_taskbar_icon(&window);
-        if self.root {
-            crate::app::instance::register_window(super::d3d11::window_hwnd(&window)?)?;
-        }
+        let notification = if self.config.notification {
+            Some(crate::platform::windows::notifications::Placement::new(
+                &window,
+            )?)
+        } else {
+            None
+        };
         if self.config.centered
             && let Some(monitor) = window.current_monitor()
         {
@@ -169,6 +182,12 @@ impl Runner {
             .take()
             .context("desktop factory already consumed")?;
         let app = AppSession(factory(&context, Some(graphics)));
+        let uses_tray = self.root && app.0.uses_tray();
+        if uses_tray {
+            crate::application::app::instance::register_window(super::d3d11::window_hwnd(
+                &window,
+            )?)?;
+        }
         let refresh = window
             .current_monitor()
             .and_then(|monitor| monitor.refresh_rate_millihertz())
@@ -181,7 +200,14 @@ impl Runner {
             input,
             viewport,
             close_requested: false,
+            tray: if uses_tray {
+                Some(super::tray::Tray::new()?)
+            } else {
+                None
+            },
+            exiting: false,
             show_after_present: self.config.viewport.visible.unwrap_or(true),
+            focus_after_present: self.config.viewport.active.unwrap_or(true),
             window_move: Default::default(),
             window_resize: Default::default(),
             min_inner_size,
@@ -189,7 +215,9 @@ impl Runner {
             last_frame: None,
             interval: Duration::from_secs_f64(1000.0 / f64::from(refresh)),
             window,
+            notification,
         });
+        if self.root {crate::application::bootstrap::ready();}
         let state = self.state.as_mut().expect("created desktop state");
         state.render()?;
         state.app.0.on_focus_changed(state.window.has_focus());
@@ -222,6 +250,9 @@ impl DesktopWindow {
     fn render(&mut self) -> Result<()> {
         self.next_repaint = None;
         self.last_frame = Some(Instant::now());
+        if let Some(placement) = &mut self.notification {
+            placement.refresh(&self.window);
+        }
         egui_winit::update_viewport_info(&mut self.viewport, &self.context, &self.window, false);
         let mut input = self.input.take_egui_input(&self.window);
         input
@@ -251,18 +282,23 @@ impl DesktopWindow {
                     None,
                 );
             });
-            if self.window.fullscreen().is_none() {
-                super::chrome::title_bar_panel(
+            if self.notification.is_none() && self.window.fullscreen().is_none() {
+                let alert = self.app.0.title_bar_alert();
+                super::chrome::title_bar_panel_alert(
                     ui,
                     "desktop-window-chrome",
                     super::chrome::title_bar_height(),
+                    alert.is_some(),
                     |ui| {
-                        if super::chrome::window_title_bar(
+                        if super::chrome::window_title_bar_alert(
                             ui,
                             &self.window,
                             &self.window.title(),
                             Some(&mut self.window_move),
+                            true,
+                            alert.as_ref(),
                         ) {
+                            self.exiting = false;
                             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                         }
                     },
@@ -318,6 +354,13 @@ impl DesktopWindow {
         }
         // Both native CloseRequested/Alt+F4 and the custom caption command
         // reach this point before any resources or business windows are closed.
+        if self.close_requested && self.tray.is_some() && !self.exiting && !self.app.0.exit_ready()
+        {
+            self.close_requested = false;
+            self.show_after_present = false;
+            self.window.set_visible(false);
+            self.app.0.on_focus_changed(false);
+        }
         if self.close_requested && !self.app.0.on_close_requested() {
             self.close_requested = false;
             self.context.request_repaint();
@@ -325,11 +368,26 @@ impl DesktopWindow {
         if let Some(size) = self.window_resize.requested_render_size.take() {
             self.presenter.resize(size)?;
         }
-        if !self.close_requested && self.window.is_minimized() != Some(true) {
+        if !self.close_requested
+            && (self.show_after_present || self.window.is_visible() != Some(false))
+            && self.window.is_minimized() != Some(true)
+        {
             let presented = self.presenter.render(&self.context, drawing, false)?;
-            if presented && self.show_after_present {
+            if presented.ready() && self.show_after_present {
                 self.show_after_present = false;
                 self.window.set_visible(true);
+                if std::mem::take(&mut self.focus_after_present) {
+                    // Respect Windows foreground permission. winit's Windows
+                    // focus_window() synthesizes Alt input; activation here
+                    // needs only the permission granted by our launcher.
+                    if let Ok(hwnd) = super::d3d11::window_hwnd(&self.window) {
+                        let activated = unsafe {
+                            windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow(hwnd)
+                        }
+                        .as_bool();
+                        tracing::debug!(activated, "initial window foreground activation");
+                    }
+                }
             }
         } else if !self.close_requested {
             // QR/font updates must survive a minimized window and upload on restore.
@@ -364,6 +422,7 @@ impl ApplicationHandler<Event> for Runner {
                 Ok(())
             }
             WindowEvent::CloseRequested => {
+                state.exiting = false;
                 state.close_requested = true;
                 state.render()
             }
@@ -376,7 +435,16 @@ impl ApplicationHandler<Event> for Runner {
             }
             WindowEvent::Resized(size) => {
                 state.schedule(Instant::now());
+                if let Some(placement) = &mut state.notification {
+                    placement.refresh(&state.window);
+                }
                 state.presenter.resize(size)
+            }
+            WindowEvent::Moved(_) | WindowEvent::ScaleFactorChanged { .. }
+                if state.notification.is_some() =>
+            {
+                state.schedule(Instant::now());
+                Ok(())
             }
             WindowEvent::RedrawRequested => state.render(),
             _ => {
@@ -413,15 +481,14 @@ impl ApplicationHandler<Event> for Runner {
             if let Some(when) = state.next_repaint {
                 if when <= Instant::now() {
                     state.next_repaint = None;
-                    if state.show_after_present {
-                        // Hidden HWNDs need not receive WM_PAINT. Retry a busy
-                        // first Present directly, at the regular repaint deadline.
-                        if let Err(error) = state.render() {
-                            self.fail(event_loop, error);
-                            return;
-                        }
-                    } else {
-                        state.window.request_redraw();
+                    // WM_PAINT is not a reliable completion signal for covered
+                    // or minimized windows. Run the due UI pass here so worker
+                    // events and the next deadline do not depend on mouse input.
+                    // render() already defers presentation for hidden/minimized
+                    // windows; native RedrawRequested still handles exposure.
+                    if let Err(error) = state.render() {
+                        self.fail(event_loop, error);
+                        return;
                     }
                     event_loop.set_control_flow(
                         state
@@ -538,6 +605,24 @@ impl ApplicationHandler<Event> for Windows {
                     viewer.runner.user_event(event_loop, Event::Repaint(event));
                 }
             }
+            Event::Request(Request::ShowMain) => {
+                if let Some(state) = &mut self.main.state {
+                    state.window.set_visible(true);
+                    state.window.set_minimized(false);
+                    state.window.focus_window();
+                    state.context.request_repaint();
+                }
+            }
+            Event::Request(Request::Exit) => {
+                if let Some(state) = &mut self.main.state {
+                    state.exiting = true;
+                    state.close_requested = true;
+                    if let Err(error) = state.render() {
+                        self.main.fail(event_loop, error);
+                    }
+                }
+                self.main.finish_close(event_loop);
+            }
             Event::Request(Request::Focus(key)) => self.focus(&key),
             Event::Request(Request::Open {
                 key,
@@ -545,7 +630,9 @@ impl ApplicationHandler<Event> for Windows {
                 factory,
             }) => {
                 if self.windows.contains_key(&key) {
-                    self.focus(&key);
+                    if !config.notification {
+                        self.focus(&key);
+                    }
                     return;
                 }
                 let mut window = Runner {

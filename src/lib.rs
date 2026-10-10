@@ -1,69 +1,21 @@
-//! OpenUUYC: native UU Remote interoperability building blocks.
-//!
-//! Platform support: Windows (full client), Linux (controller milestone — see `LINUX.md`).
+//! OpenUUYC: UU protocol interoperability and Windows application composition.
+
+#[cfg(not(windows))]
+compile_error!("OpenUUYC currently supports Windows only");
 
 pub const APP_NAME: &str = "OpenUUYC";
 pub(crate) const VIEWER_TITLE_PREFIX: &str = "OpenUUYC — ";
 
-mod paths;
-pub mod api;
-pub mod app;
-pub mod assist;
-mod audio;
-pub mod auth;
-mod capability;
-pub mod client;
-mod clipboard;
-mod codec_parameters;
-mod control;
-pub mod controller;
-mod decoder;
-mod decoder_pool;
-mod decoder_result;
-mod device_change;
-mod device_session;
-mod display_hdr;
-mod feature_ability;
-mod file_transfer;
-mod flexfec;
-pub mod logging;
-pub mod login;
+pub mod account;
+pub mod application;
+pub mod diagnostics;
+pub mod features;
 pub mod media;
-mod microphone;
-mod network_control;
-mod nrd_http;
-pub mod official_receiver;
-mod official_version;
-pub mod performance;
+pub mod protocol;
+pub mod session;
+pub mod transport;
 
-#[cfg(windows)]
 pub mod plugins;
-#[cfg(target_os = "linux")]
-#[path = "plugins_linux.rs"]
-pub mod plugins;
-mod port_mapping;
-mod power;
-mod presence;
-mod remote_cursor;
-mod remote_input;
-mod mac_keycodes;
-mod remote_upgrade;
-mod rsfec;
-pub mod rtc;
-mod rtcp_timing;
-pub mod rtp_capture;
-mod session_restore;
-pub mod signal;
-pub mod stream_control;
-mod timing;
 mod ui;
-mod ulpfec;
-mod uu_kcp;
-mod video_color;
-mod video_format;
-pub mod viewer;
-mod viewer_shortcuts;
-mod viewing_settings;
-mod virtual_hardware;
-mod wallpaper;
-mod xor_fec;
+
+mod platform;
