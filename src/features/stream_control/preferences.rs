@@ -37,6 +37,9 @@ impl StreamControlHandle {
         if state.device_preferences_loaded {
             return;
         }
+        let mut preferences = preferences;
+        // The global "auto take control" setting acts as a per-device default.
+        preferences.control_enabled |= state.auto_mouse_control;
         state.device_preferences = preferences;
         state.device_preferences_loaded = true;
         state.restore_input_pending = preferences.control_enabled;

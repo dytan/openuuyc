@@ -186,6 +186,7 @@ struct State {
     stopping: bool,
     mode: MouseMode,
     relative: bool,
+    relative_denied: bool,
     owner: Option<u64>,
     drag_hold: Option<(u64, u64)>,
     drag_serial: u64,
@@ -307,6 +308,15 @@ impl RemoteInput {
         self.lock().waiting_for_neutral
     }
 
+    pub fn transport_ready(&self) -> bool {
+        let s = self.lock();
+        s.ready && !s.stopping
+    }
+
+    pub fn keyboard_platform_code(&self) -> i32 {
+        self.lock().keyboard_platform
+    }
+
     /// A native input adapter confirms that both keyboard and mouse are up.
     /// A delayed callback from another activation cannot reopen input.
     pub fn confirm_neutral(&self, generation: u64) {
@@ -324,10 +334,20 @@ impl RemoteInput {
     }
 
     pub fn keyboard_supported(&self) -> bool {
+        matches!(self.lock().keyboard_platform, 1 | 4)
+    }
+
+    /// Ctrl+Alt+Del / SecureDesktop SAS is a Windows Winlogon chord only.
+    pub fn windows_sas_supported(&self) -> bool {
         self.lock().keyboard_platform == 1
     }
 
     /// Explicit viewer command, never injected into the local Windows desktop.
+    ///
+    /// Host-side Winlogon expects this chord (often via SendSAS). Keys use the
+    /// same `interrept` flag as physical typing so the controlled agent treats
+    /// the sequence as a real interruptible input stream, matching Mac UURemote
+    /// CAD shortcut behaviour.
     pub fn send_ctrl_alt_del(&self, owner: u64) -> Result<()> {
         let mut s = self.lock();
         if s.keyboard_platform != 1 {
@@ -352,10 +372,15 @@ impl RemoteInput {
                 key,
                 down,
                 lock: None,
-                // A finite menu command has no physical key/heartbeat owner.
-                interrupt: false,
+                interrupt: true,
             });
         }
+        tracing::info!(
+            target: "openuuyc::viewer::input",
+            owner,
+            queue = s.queue.len(),
+            "Ctrl+Alt+Del sequence queued for CONTROL"
+        );
         // next() tracks potentially submitted presses in remote_keys, so
         // cancellation/failure still releases them without replaying Delete.
         drop(s);
@@ -370,21 +395,48 @@ impl RemoteInput {
             return false;
         }
         let mut s = self.lock();
-        if s.keyboard_platform != 1 {
+        let platform = s.keyboard_platform;
+        if !matches!(platform, 1 | 4) {
+            tracing::debug!(
+                target: "openuuyc::viewer::input",
+                platform,
+                key,
+                down,
+                "keyboard event dropped: platform has no keyboard adapter"
+            );
             return false;
         }
+        // Adapters always supply Windows VKs. macOS hosts need CGKeyCodes on the
+        // wire (same transform UU Android applies via WindowsToMacTransformer).
+        let (wire_key, win_vk) = if platform == 4 {
+            match crate::mac_keycodes::win_vk_to_mac(key) {
+                Some(mac) => (mac, key),
+                None => {
+                    tracing::debug!(
+                        target: "openuuyc::viewer::input",
+                        key,
+                        down,
+                        "macOS keyboard: no CGKeyCode for Windows VK; dropping"
+                    );
+                    return false;
+                }
+            }
+        } else {
+            (key, key)
+        };
         if down {
             if !Self::claim(&mut s, owner) {
                 return false;
             }
-        } else if s.owner != Some(owner) || !s.keys.contains_key(&key) {
+        } else if s.owner != Some(owner) || !s.keys.contains_key(&wire_key) {
             return false;
         }
-        let lock = lock.filter(|v| matches!(key, 20 | 144 | 145) && matches!(v, 0 | 128));
+        // Lock-status fields are Windows-only (Caps/Num/Scroll VKs).
+        let lock = lock.filter(|v| platform == 1 && matches!(key, 20 | 144 | 145) && matches!(v, 0 | 128));
         let accepted = Self::push(
             &mut s,
             InputEvent::Key {
-                key,
+                key: wire_key,
                 down,
                 lock,
                 interrupt: true,
@@ -392,10 +444,19 @@ impl RemoteInput {
         );
         if accepted {
             if down {
-                s.keys.insert(key, lock);
+                s.keys.insert(wire_key, lock);
             } else {
-                s.keys.remove(&key);
+                s.keys.remove(&wire_key);
             }
+            tracing::info!(
+                target: "openuuyc::viewer::input",
+                platform,
+                win_vk,
+                wire_key,
+                down,
+                queue = s.queue.len(),
+                "keyboard edge queued for CONTROL"
+            );
         }
         drop(s);
         self.wake.notify_one();
@@ -447,6 +508,21 @@ impl RemoteInput {
     }
     pub fn relative_mode(&self) -> bool {
         self.lock().relative
+    }
+    pub fn relative_available(&self) -> bool {
+        !self.lock().relative_denied
+    }
+    /// Reported by the window that tried to take the pointer. It stays off for
+    /// the rest of the session: whatever holds the pointer is outside this
+    /// process, and retrying would only swing the mode back and forth.
+    pub fn set_relative_available(&self, available: bool) {
+        let mut s = self.lock();
+        if s.relative_denied != available {
+            return;
+        }
+        s.relative_denied = !available;
+        drop(s);
+        self.repaint();
     }
     pub fn set_relative_mode(&self, relative: bool) {
         let mut s = self.lock();
@@ -557,9 +633,15 @@ impl RemoteInput {
         s.keyboard_generation = s.keyboard_generation.wrapping_add(1);
         s.release_checkpoint.extend(s.remote_keys.keys().copied());
         // Release ordinary keys before modifiers; never synthesize new downs.
+        let platform = s.keyboard_platform;
         for modifier in [false, true] {
             for &key in s.remote_keys.keys() {
-                if matches!(key, 16..=18 | 91..=92 | 160..=165) == modifier {
+                let is_mod = if platform == 4 {
+                    crate::mac_keycodes::is_mac_modifier(key)
+                } else {
+                    matches!(key, 16..=18 | 91..=92 | 160..=165)
+                };
+                if is_mod == modifier {
                     s.queue.push_back(InputEvent::Key {
                         key,
                         down: false,
@@ -706,6 +788,15 @@ impl RemoteInput {
 
     fn claim(s: &mut State, owner: u64) -> bool {
         if !s.ready || s.stopping || s.mode == MouseMode::View || s.waiting_for_neutral {
+            tracing::debug!(
+                target: "openuuyc::viewer::input",
+                ready = s.ready,
+                stopping = s.stopping,
+                mode = ?s.mode,
+                waiting_for_neutral = s.waiting_for_neutral,
+                owner,
+                "remote input claim rejected"
+            );
             return false;
         }
         if s.owner != Some(owner) {
@@ -729,6 +820,16 @@ impl RemoteInput {
     }
 
     pub fn absolute(&self, owner: u64, screen: i32, x: f64, y: f64) {
+        self.absolute_inner(owner, screen, x, y, false);
+    }
+
+    /// Absolute move used when relative mode is desired but the viewer has not
+    /// secured an exclusive pointer grab yet (or the desktop refused one).
+    pub fn absolute_without_relative_gate(&self, owner: u64, screen: i32, x: f64, y: f64) {
+        self.absolute_inner(owner, screen, x, y, true);
+    }
+
+    fn absolute_inner(&self, owner: u64, screen: i32, x: f64, y: f64, allow_during_relative: bool) {
         if screen < 0
             || !x.is_finite()
             || !y.is_finite()
@@ -738,7 +839,7 @@ impl RemoteInput {
             return;
         }
         let mut s = self.lock();
-        if s.relative || !Self::claim(&mut s, owner) {
+        if (s.relative && !allow_during_relative) || !Self::claim(&mut s, owner) {
             return;
         }
         if let Some(InputEvent::Absolute {
@@ -812,7 +913,14 @@ impl RemoteInput {
         // Do not collapse rapid DOWN/UP transitions to a frame's final state.
         if Self::push(&mut s, InputEvent::Button { button, down }) {
             s.held[index] = down;
-            tracing::trace!(button, down, "mouse button edge queued");
+            tracing::info!(
+                target: "openuuyc::viewer::input",
+                button,
+                down,
+                owner,
+                queue = s.queue.len(),
+                "mouse button edge queued"
+            );
         }
         drop(s);
         self.wake.notify_one();

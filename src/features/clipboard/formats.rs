@@ -1,5 +1,6 @@
 use super::*;
 use std::io::Cursor;
+#[cfg(windows)]
 use windows::{
     Win32::System::DataExchange::{GetClipboardFormatNameW, RegisterClipboardFormatW},
     core::PCWSTR,
@@ -9,14 +10,122 @@ pub(super) struct Format {
     pub wire: ClipboardFormat,
     pub local: u32,
 }
+#[cfg(windows)]
 pub(super) fn register(name: &str) -> u32 {
     let s: Vec<u16> = name.encode_utf16().chain([0]).collect();
     unsafe { RegisterClipboardFormatW(PCWSTR(s.as_ptr())) }
 }
+#[cfg(windows)]
 pub(super) fn name(id: u32) -> String {
     let mut s = [0u16; 1024];
     let n = unsafe { GetClipboardFormatNameW(id, &mut s) };
     String::from_utf16_lossy(&s[..n.max(0) as usize])
+}
+
+/// The wire protocol speaks Windows clipboard-format ids, so a process-local
+/// registry stands in for the system one: the same name always maps to the same
+/// id within this client, starting at CF_PRIVATEFIRST like Windows does.
+#[cfg(not(windows))]
+fn registry() -> &'static Mutex<(HashMap<String, u32>, HashMap<u32, String>)> {
+    static REGISTRY: std::sync::OnceLock<Mutex<(HashMap<String, u32>, HashMap<u32, String>)>> =
+        std::sync::OnceLock::new();
+    REGISTRY.get_or_init(Mutex::default)
+}
+
+#[cfg(not(windows))]
+pub(super) fn register(name: &str) -> u32 {
+    if name.is_empty() {
+        return 0;
+    }
+    let mut registry = lock(registry());
+    if let Some(id) = registry.0.get(name) {
+        return *id;
+    }
+    let id = 0xc000 + registry.0.len() as u32;
+    if id > 0xffff {
+        return 0;
+    }
+    registry.0.insert(name.to_owned(), id);
+    registry.1.insert(id, name.to_owned());
+    id
+}
+
+#[cfg(not(windows))]
+pub(super) fn name(id: u32) -> String {
+    if let Some(name) = standard_name(id) {
+        return name.to_owned();
+    }
+    lock(registry()).1.get(&id).cloned().unwrap_or_default()
+}
+
+/// The predefined CF_* formats this client can name without the system.
+#[cfg(not(windows))]
+const fn standard_name(id: u32) -> Option<&'static str> {
+    Some(match id {
+        1 => "CF_TEXT",
+        2 => "CF_BITMAP",
+        3 => "CF_METAFILEPICT",
+        4 => "CF_SYLK",
+        5 => "CF_DIF",
+        6 => "CF_TIFF",
+        7 => "CF_OEMTEXT",
+        8 => "CF_DIB",
+        9 => "CF_PALETTE",
+        10 => "CF_PENDATA",
+        11 => "CF_RIFF",
+        12 => "CF_WAVE",
+        13 => "CF_UNICODETEXT",
+        14 => "CF_ENHMETAFILE",
+        15 => "CF_HDROP",
+        16 => "CF_LOCALE",
+        17 => "CF_DIBV5",
+        _ => return None,
+    })
+}
+
+/// File names arriving from a Windows peer must stay valid Windows names, even
+/// when this client writes them on a filesystem that would accept more.
+pub(super) fn safe_name(s: &str) -> bool {
+    !s.is_empty()
+        && s.encode_utf16().count() < 260
+        && !s.contains(['\0', ':'])
+        && !s.starts_with(['\\', '/'])
+        && s.split(['\\', '/']).all(|p| {
+            !p.is_empty()
+                && p != "."
+                && p != ".."
+                && !p.ends_with(['.', ' '])
+                && !p.chars().any(|c| c < ' ' || "<>\"|?*".contains(c))
+                && !matches!(
+                    p.split('.')
+                        .next()
+                        .unwrap_or("")
+                        .to_ascii_uppercase()
+                        .as_str(),
+                    "CON"
+                        | "PRN"
+                        | "AUX"
+                        | "NUL"
+                        | "COM1"
+                        | "COM2"
+                        | "COM3"
+                        | "COM4"
+                        | "COM5"
+                        | "COM6"
+                        | "COM7"
+                        | "COM8"
+                        | "COM9"
+                        | "LPT1"
+                        | "LPT2"
+                        | "LPT3"
+                        | "LPT4"
+                        | "LPT5"
+                        | "LPT6"
+                        | "LPT7"
+                        | "LPT8"
+                        | "LPT9"
+                )
+        })
 }
 pub(super) fn file_format(id: u32, name: &str) -> bool {
     id == 15
@@ -60,7 +169,8 @@ pub(super) fn incoming(f: ClipboardFormat, platform: i32, files: bool) -> Option
     let local = if platform == 4 {
         match f.name.as_str() {
             "public.utf8-plain-text" | "public.utf16-plain-text" | "public.plain-text" => 13,
-            "public.tiff" => 8,
+            // Mac pasteboard often offers PNG/JPEG rather than TIFF.
+            "public.tiff" | "public.png" | "public.jpeg" | "public.jpeg-image" => 8,
             "public.html" => register("HTML Format"),
             "public.file-url" if files => register("FileGroupDescriptorW"),
             _ => return None,
@@ -93,7 +203,8 @@ pub(super) fn outgoing(ids: &[(u32, String)], platform: i32, files: bool) -> Vec
         }
         let names: &[&str] = match *id {
             13 => &["public.utf8-plain-text", "public.utf16-plain-text"],
-            8 => &["public.tiff"],
+            // Prefer PNG for macOS peers; keep TIFF as a fallback UTI.
+            8 => &["public.png", "public.tiff"],
             _ if n == "HTML Format" => &["public.html"],
             _ if n == "FileGroupDescriptorW" => &["public.file-url"],
             _ => &[],
@@ -194,11 +305,17 @@ pub(super) fn convert(data: Vec<u8>, f: &Format, platform: i32, outbound: bool) 
                 result
             }
         }
-        "public.tiff" => {
+        "public.tiff" | "public.png" | "public.jpeg" | "public.jpeg-image" => {
+            let wire = f.wire.name.as_str();
             let (bytes, kind) = if outbound {
                 (dib_to_bmp(&data)?, image::ImageFormat::Bmp)
             } else {
-                (data, image::ImageFormat::Tiff)
+                let kind = match wire {
+                    "public.png" => image::ImageFormat::Png,
+                    "public.jpeg" | "public.jpeg-image" => image::ImageFormat::Jpeg,
+                    _ => image::ImageFormat::Tiff,
+                };
+                (data, kind)
             };
             let mut reader = image::ImageReader::with_format(Cursor::new(bytes), kind);
             let mut limits = image::Limits::default();
@@ -208,10 +325,15 @@ pub(super) fn convert(data: Vec<u8>, f: &Format, platform: i32, outbound: bool) 
             reader.limits(limits);
             let image = reader.decode()?;
             let mut out = Cursor::new(Vec::new());
+            let outbound_fmt = match wire {
+                "public.png" => image::ImageFormat::Png,
+                "public.jpeg" | "public.jpeg-image" => image::ImageFormat::Jpeg,
+                _ => image::ImageFormat::Tiff,
+            };
             image.write_to(
                 &mut out,
                 if outbound {
-                    image::ImageFormat::Tiff
+                    outbound_fmt
                 } else {
                     image::ImageFormat::Bmp
                 },
@@ -266,4 +388,33 @@ fn dib_to_bmp(d: &[u8]) -> Result<Vec<u8>> {
     out.extend_from_slice(&((14 + offset) as u32).to_le_bytes());
     out.extend_from_slice(d);
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mac_utf8_text_roundtrip() {
+        let format = Format {
+            wire: ClipboardFormat {
+                id: 1,
+                name: "public.utf8-plain-text".into(),
+            },
+            local: 13,
+        };
+        let local = unicode("hello\nmac");
+        let wire = convert(local.clone(), &format, 4, true).unwrap();
+        assert_eq!(wire, b"hello\nmac");
+        let back = convert(wire, &format, 4, false).unwrap();
+        assert_eq!(utf16(&back).unwrap().replace("\r\n", "\n"), "hello\nmac");
+    }
+
+    #[test]
+    fn mac_outgoing_text_utis() {
+        let out = outgoing(&[(13, String::new())], 4, false);
+        let names: Vec<_> = out.iter().map(|f| f.wire.name.as_str()).collect();
+        assert!(names.contains(&"public.utf8-plain-text"));
+        assert!(names.contains(&"public.utf16-plain-text"));
+    }
 }

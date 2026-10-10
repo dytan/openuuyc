@@ -42,17 +42,33 @@ pub fn host_resident(parent: u32) -> anyhow::Result<()> {
 pub fn component_error_code(error: &anyhow::Error) -> Option<i32> {
     if error.is::<crate::platform::windows::host_service::install::ActiveSession>() {
         Some(170)
-    } else if error.is::<crate::platform::windows::display::install::DriverInUse>() {
+    } else if cfg!(windows) && is_driver_in_use(error) {
         Some(2404)
     } else {
         None
     }
 }
+#[cfg(windows)]
+fn is_driver_in_use(error: &anyhow::Error) -> bool {
+    error.is::<crate::platform::windows::display::install::DriverInUse>()
+}
+#[cfg(not(windows))]
+fn is_driver_in_use(_error: &anyhow::Error) -> bool {
+    false
+}
 pub fn input_agent(pipe: &str, parent: u32) -> anyhow::Result<()> {
     crate::features::host::input::broker::agent(pipe, parent)
 }
 pub fn capture_agent(pipe: &str, parent: u32) -> anyhow::Result<()> {
-    crate::platform::windows::capture_service::agent(pipe, parent)
+    #[cfg(windows)]
+    {
+        crate::platform::windows::capture_service::agent(pipe, parent)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (pipe, parent);
+        crate::platform::linux::unsupported()
+    }
 }
 pub use crate::platform::windows::components::{
     Kind as ComponentKind, Operation as ComponentOperation, RemovalOptions,

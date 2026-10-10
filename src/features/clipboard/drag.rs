@@ -222,6 +222,7 @@ impl Clipboard {
     }
 }
 
+#[cfg(windows)]
 /// The official protocol provides a final drop action, not a live drag stream.
 /// Execute it in the interactive user, with the same scoped OLE file provider.
 pub(super) fn receive(

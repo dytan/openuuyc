@@ -1,4 +1,5 @@
 //! Session-owned Draw execution. Network callbacks never paint or query Windows.
+#[cfg_attr(target_os = "linux", path = "annotation/agent_linux.rs")]
 pub(crate) mod agent;
 mod model;
 

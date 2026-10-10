@@ -9,9 +9,9 @@ mod hevc;
 mod output;
 
 use cros_libva::VAProfile;
-use mediaway_common::CodecKind;
+use crate::media::VideoCodec as CodecKind;
 
-use crate::decoder::platform::{DecodeError, VideoDecoderConfig};
+use crate::media::decode_api::{DecodeError, VideoDecoderConfig};
 
 pub(super) use avc::Frame;
 
@@ -19,7 +19,7 @@ pub(super) struct Session {
     codec: Codec,
     /// The parameter sets from the negotiation, prepended to the first access
     /// unit so the parser can activate an SPS/PPS before the first slice.
-    extra: Option<mediaway_common::Bytes>,
+    extra: Option<bytes::Bytes>,
 }
 
 enum Codec {
@@ -51,8 +51,8 @@ impl Session {
                     extra: Some(config.extra_data.clone()),
                 })
             }
-            CodecKind::Hevc => {
-                if !probe(CodecKind::Hevc, config.width, config.height, 8, 1) {
+            CodecKind::H265 => {
+                if !probe(CodecKind::H265, config.width, config.height, 8, 1) {
                     return Err(DecodeError::Unsupported);
                 }
                 Ok(Self {
@@ -104,7 +104,7 @@ pub(super) fn probe(codec: CodecKind, width: u32, height: u32, depth: u8, chroma
             VAProfile::VAProfileH264Main,
             VAProfile::VAProfileH264ConstrainedBaseline,
         ],
-        CodecKind::Hevc => &[VAProfile::VAProfileHEVCMain],
+        CodecKind::H265 => &[VAProfile::VAProfileHEVCMain],
         _ => return false,
     };
     profiles

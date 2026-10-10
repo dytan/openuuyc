@@ -199,6 +199,14 @@ pub struct ConnectionMediaOptions {
     pub codec: CodecPreference,
     pub decoder: super::selection::DecoderPreference,
     pub transport: TransportChoice,
+    /// Take keyboard and mouse control as soon as the control channel is ready,
+    /// instead of waiting for the player's 键鼠控制 button.
+    pub auto_mouse_control: bool,
+    /// Offer and accept files through the clipboard. Off by default: a copy
+    /// reaches for whatever it names, so it carries more than a paste of text
+    /// or a picture does, and the player's 文件复制 switch turns it on per
+    /// session.
+    pub clipboard_files: bool,
 }
 
 impl Default for ConnectionMediaOptions {
@@ -210,8 +218,17 @@ impl Default for ConnectionMediaOptions {
             codec: CodecPreference::Auto,
             decoder: Default::default(),
             transport: TransportChoice::Auto,
+            auto_mouse_control: true,
+            clipboard_files: false,
         }
     }
+}
+
+/// Prefer software decode on Linux until a native HW path exists.
+pub const fn default_hardware_decode() -> bool {
+    // Windows: DXVA11. Linux: VA-API when the driver supports the stream;
+    // DecoderCandidate::available always appends SoftwareH264 as fallback.
+    true
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -223,6 +240,9 @@ pub(crate) struct ConnectionMediaProfile {
     pub decoder_fps_cap: u32,
     pub codec: CodecPreference,
     pub decoder: super::selection::DecoderPreference,
+    /// Take keyboard/mouse control once the session is ready, even when this
+    /// device has no saved "control enabled" preference yet.
+    pub auto_mouse_control: bool,
 }
 
 impl ConnectionMediaOptions {
@@ -237,6 +257,7 @@ impl ConnectionMediaOptions {
             decoder_fps_cap: display.refresh_hz.max(stream_fps),
             codec: self.codec,
             decoder: self.decoder,
+            auto_mouse_control: self.auto_mouse_control,
         })
     }
     pub fn validate(self) -> Result<()> {

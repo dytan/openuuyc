@@ -213,9 +213,7 @@ pub fn register(owner: u64, gates: Vec<Arc<Gate>>, controls: Vec<Arc<ControlGate
             .chain([91, 92, 160, 161, 162, 163, 164, 165])
             .collect::<Vec<_>>();
         for key in keys {
-            if unsafe {
-                windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(i32::from(key))
-            } < 0
+            if crate::plugins::async_key_down(key)
             {
                 r.held.insert(key);
             } else {

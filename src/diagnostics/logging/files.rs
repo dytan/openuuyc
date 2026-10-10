@@ -15,14 +15,8 @@ pub(super) fn directories() -> Result<(PathBuf, PathBuf)> {
         let base = crate::platform::windows::host_service::vault::root()?;
         return Ok((base.clone(), base.join("logs")));
     }
-    {
-        let base = std::env::var_os("LOCALAPPDATA")
-            .map(PathBuf::from)
-            .filter(|p| p.is_absolute())
-            .context("LOCALAPPDATA must be an absolute directory")?
-            .join("OpenUUYC");
-        Ok((base.clone(), base.join("logs")))
-    }
+    let base = crate::paths::app_data_dir()?;
+    Ok((base.clone(), base.join("logs")))
 }
 
 fn create(path: &Path, append: bool) -> io::Result<File> {
@@ -50,6 +44,7 @@ fn state_directory(directory: &Path) -> io::Result<PathBuf> {
     let state = directory.join(".state");
     fs::create_dir_all(&state)?;
 
+    #[cfg(windows)]
     {
         use std::os::windows::ffi::OsStrExt;
         use windows::{
@@ -77,6 +72,7 @@ pub(super) fn save_config(path: &Path, bytes: &[u8]) -> Result<()> {
         file.sync_all()?;
         drop(file);
 
+        #[cfg(windows)]
         {
             use std::os::windows::ffi::OsStrExt;
             use windows::{
@@ -95,6 +91,10 @@ pub(super) fn save_config(path: &Path, bytes: &[u8]) -> Result<()> {
                 )
             }?;
         }
+        #[cfg(not(windows))]
+        {
+            fs::rename(&temporary, path)?;
+        }
 
         Ok(())
     })();
@@ -105,6 +105,7 @@ pub(super) fn save_config(path: &Path, bytes: &[u8]) -> Result<()> {
 }
 
 pub(super) fn open_directory(directory: &Path) -> Result<()> {
+    #[cfg(windows)]
     {
         use std::os::windows::ffi::OsStrExt;
         use windows::{
@@ -126,6 +127,10 @@ pub(super) fn open_directory(directory: &Path) -> Result<()> {
         if result.0 as isize <= 32 {
             bail!("打开日志文件夹失败（{}）", result.0 as isize);
         }
+    }
+    #[cfg(not(windows))]
+    {
+        crate::platform::linux::open_path(directory).context("打开日志文件夹失败")?;
     }
 
     Ok(())

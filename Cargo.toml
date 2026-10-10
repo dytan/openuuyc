@@ -13,6 +13,8 @@ name = "OpenUUYC"
 path = "src/main.rs"
 
 [dependencies]
+openuuyc-plugin-api = { path = "plugins/sdk" }
+libloading = "0.8.9"
 anyhow = "1.0"
 async-trait = "0.1"
 bytemuck = { version = "1.25.2", features = ["derive", "min_const_generics"] }
@@ -27,8 +29,6 @@ egui = { version = "0.36.1", default-features = false, features = ["bytemuck"] }
 flate2 = "1.1.10"
 futures-util = "0.3.34"
 goog_cc = { path = "vendor/goog_cc" }
-openuuyc-amf-sys = { path = "vendor/amf-sys" }
-openuuyc-vpl-sys = { path = "vendor/vpl-sys" }
 hmac = "0.12.1"
 hyper = { version = "1.11.1", default-features = false }
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "bmp", "tiff"] }
@@ -62,6 +62,7 @@ yuv = "0.8.17"
 object = { version = "0.37.3", default-features = false, features = ["read_core", "std", "pe"] }
 zip = { version = "8.6.0", default-features = false, features = ["zstd"] }
 regex = "1.13.1"
+openuuyc-codec = { path = "crates/codec" }
 
 [build-dependencies]
 cc = "1.2"
@@ -71,11 +72,10 @@ flate2 = "1.1.10"
 
 [target.'cfg(windows)'.dependencies]
 openuuyc-bootstrap = { path = "crates/bootstrap" }
+openuuyc-amf-sys = { path = "vendor/amf-sys" }
+openuuyc-vpl-sys = { path = "vendor/vpl-sys" }
 # Required by the generated code of #[windows::core::implement].
 windows-core = "0.62.2"
-openuuyc-plugin-api = { path = "plugins/sdk" }
-openuuyc-codec = { path = "crates/codec" }
-libloading = "0.8.9"
 openuuyc-nvenc-sys = { path = "vendor/nvenc-sys" }
 egui-directx11 = { path = "vendor/egui-directx11" }
 egui-winit = { version = "0.36.1", default-features = false, features = ["clipboard", "links"] }
@@ -139,10 +139,8 @@ windows = { version = "0.62.2", default-features = false, features = [
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Accessibility",
 ] }
-
-
 [target.'cfg(target_os = "linux")'.dependencies]
-openuuyc-h264 = { path = "src/decoder/h264-core" }
+openuuyc-h264 = { path = "crates/codec/kernels/h264" }
 oxideav-h264 = { version = "=0.1.8" }
 oxideav-h265 = { version = "=0.0.10" }
 cros-libva = { path = "vendor/cros-libva" }
@@ -155,7 +153,7 @@ libc = "0.2"
 fuser = { version = "0.15", default-features = false }
 x11rb = "0.13"
 pollster = "0.4"
-
+display-info = "0.5.9"
 
 [patch.crates-io]
 dtls = { path = "vendor/dtls" }

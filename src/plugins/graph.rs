@@ -815,9 +815,9 @@ pub(crate) fn compile(
 }
 
 pub fn directory() -> Result<PathBuf> {
-    let base = PathBuf::from(std::env::var_os("LOCALAPPDATA").context("LOCALAPPDATA unavailable")?);
+    let base = crate::paths::app_data_dir()?;
     ensure!(base.is_absolute(), "invalid application directory");
-    Ok(base.join("OpenUUYC/graphs"))
+    Ok(base.join("graphs"))
 }
 pub fn path(id: &str, published: bool) -> Result<PathBuf> {
     let id = uuid::Uuid::parse_str(id)?;

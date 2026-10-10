@@ -5,7 +5,7 @@
 //! takes the same CPU path as the software decoder's output.
 use cros_libva::Image;
 
-use crate::decoder::platform::DecodeError;
+use crate::media::decode_api::DecodeError;
 
 /// Packed NV12: a full-size Y plane followed by interleaved CbCr at half size.
 pub(super) fn pack_nv12(

@@ -1,6 +1,7 @@
 //! Official Draw has no background primitive: translate one board intent into pen paths.
 use super::*;
-#[path = "branding.rs"]
+#[cfg_attr(windows, path = "branding.rs")]
+#[cfg_attr(not(windows), path = "branding_linux.rs")]
 mod branding;
 const BRUSH_WIDTH: f32 = 64.;
 #[derive(Clone)]

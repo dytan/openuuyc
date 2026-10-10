@@ -138,7 +138,7 @@ fn cancelled(cancel: &AtomicBool) -> Result<()> {
     Ok(())
 }
 fn regular(path: &Path) -> bool {
-    use std::os::windows::fs::MetadataExt;
+    use crate::platform::fs_ext::MetadataExt;
     fs::symlink_metadata(path).is_ok_and(|m| m.is_file() && m.file_attributes() & 0x400 == 0)
 }
 fn compressed_entry(name: &str, data: &[u8]) -> Result<Vec<u8>> {
@@ -204,7 +204,7 @@ fn export(
     let mut candidates = Vec::new();
     for root in roots {
         cancelled(cancel)?;
-        use std::os::windows::fs::MetadataExt;
+        use crate::platform::fs_ext::MetadataExt;
         if !fs::symlink_metadata(&root)
             .is_ok_and(|m| m.is_dir() && m.file_attributes() & 0x400 == 0)
         {
@@ -230,7 +230,7 @@ fn export(
             // Directory enumeration can retain a stale (even zero) length while
             // the logger keeps its write handle open. Capture length and identity
             // from a shared read handle, and keep it through rotation/deletion.
-            use std::os::windows::fs::OpenOptionsExt;
+            use crate::platform::fs_ext::OpenOptionsExt;
             match OpenOptions::new()
                 .read(true)
                 .share_mode(1 | 2 | 4)

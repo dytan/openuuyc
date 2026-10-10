@@ -27,7 +27,7 @@ use oxideav_h264::{
 
 use super::display::{self, Pool};
 use super::output;
-use crate::decoder::platform::DecodeError;
+use crate::media::decode_api::DecodeError;
 
 /// VA flags for a reference entry in `VAPictureParameterBufferH264`.
 const PICTURE_SHORT_TERM: u32 = cros_libva::VA_PICTURE_H264_SHORT_TERM_REFERENCE;
@@ -36,10 +36,10 @@ const PICTURE_INVALID: u32 = cros_libva::VA_PICTURE_H264_INVALID;
 const SLICE_DATA_FLAG_ALL: u32 = cros_libva::VA_SLICE_DATA_FLAG_ALL;
 
 /// One decoded picture, already copied out of its surface.
-pub(in crate::decoder::platform::linux) struct Frame {
-    pub(in crate::decoder::platform::linux) width: u32,
-    pub(in crate::decoder::platform::linux) height: u32,
-    pub(in crate::decoder::platform::linux) data: Vec<u8>,
+pub(in crate::platform::linux::decoder) struct Frame {
+    pub(in crate::platform::linux::decoder) width: u32,
+    pub(in crate::platform::linux::decoder) height: u32,
+    pub(in crate::platform::linux::decoder) data: Vec<u8>,
 }
 
 /// A slice of the access unit being assembled.

@@ -18,8 +18,8 @@ use winit::event::{
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::window::{Window, WindowAttributes, WindowId};
 
-use crate::decoder::RenderSurface;
-use crate::remote_input::MouseMode;
+use crate::media::decoder::RenderSurface;
+use crate::features::remote_input::MouseMode;
 use crate::ui::chrome::{
     WindowMoveState, WindowResizeState, cancel_pointer_operation, configure_dwm_window,
     resize_regions, title_bar_height, title_bar_panel, update_nonmodal_window_resize,
@@ -36,7 +36,7 @@ use super::{
     take_next_frame,
 };
 
-pub(super) use crate::viewer_shortcuts::Action as ViewerShortcut;
+pub(super) use crate::application::viewer_shortcuts::Action as ViewerShortcut;
 
 /// Space the caption keeps for the brand logo and the device alias.
 const TITLE_CAPTION_WIDTH: f32 = 220.0;
@@ -485,7 +485,7 @@ impl ApplicationHandler<UiEvent> for ConnectingWindowsRunner {
                 if let Stage::Playing(player) = &mut self.stage {
                     player.on_focus_changed(&window, focused);
                 }
-                crate::viewer_shortcuts::set_focused_window(if focused {
+                crate::application::viewer_shortcuts::set_focused_window(if focused {
                     u64::from(id)
                 } else {
                     0
@@ -664,11 +664,11 @@ impl Player {
         })
     }
 
-    fn control(&self) -> &crate::stream_control::StreamControlHandle {
+    fn control(&self) -> &crate::features::stream_control::StreamControlHandle {
         &self.session.stream_control
     }
 
-    fn input(&self) -> &crate::remote_input::RemoteInput {
+    fn input(&self) -> &crate::features::remote_input::RemoteInput {
         self.session.stream_control.mouse()
     }
 
@@ -701,7 +701,7 @@ impl Player {
         self.video_size = Some((frame.width, frame.height, frame.rotation));
         self.session
             .performance
-            .record_rendered_frame(crate::performance::RenderedFrameTiming {
+            .record_rendered_frame(crate::diagnostics::performance::RenderedFrameTiming {
                 is_new_picture: frame.is_new_picture,
                 width: frame.width,
                 height: frame.height,
@@ -975,7 +975,7 @@ impl Player {
             .selectable_label(controlling, "键鼠控制")
             .on_hover_text(format!(
                 "退出控制：{}",
-                crate::viewer_shortcuts::label(ViewerShortcut::ReleaseMouse)
+                crate::application::viewer_shortcuts::label(ViewerShortcut::ReleaseMouse)
             ))
             .clicked()
         {
@@ -1136,7 +1136,7 @@ impl Player {
                     return false;
                 }
                 let down = event.state == ElementState::Pressed;
-                if let Some(key) = crate::viewer_shortcuts::physical_key(event.physical_key) {
+                if let Some(key) = crate::application::viewer_shortcuts::physical_key(event.physical_key) {
                     if down {
                         if !self.physical_keys.contains(&key) {
                             self.physical_keys.push(key);
@@ -1157,7 +1157,7 @@ impl Player {
                 if ui_owns_keys || self.input().mode() == MouseMode::View {
                     return false;
                 }
-                let Some(key) = crate::viewer_shortcuts::physical_key(event.physical_key) else {
+                let Some(key) = crate::application::viewer_shortcuts::physical_key(event.physical_key) else {
                     return false;
                 };
                 if down {
@@ -1496,12 +1496,12 @@ fn viewer_shortcut(
     modifiers: winit::keyboard::ModifiersState,
     key: winit::keyboard::PhysicalKey,
 ) -> Option<ViewerShortcut> {
-    if crate::viewer_shortcuts::suspended() {
+    if crate::application::viewer_shortcuts::suspended() {
         return None;
     }
-    crate::viewer_shortcuts::match_key(
-        crate::viewer_shortcuts::physical_key(key)?,
-        crate::viewer_shortcuts::modifiers(modifiers),
+    crate::application::viewer_shortcuts::match_key(
+        crate::application::viewer_shortcuts::physical_key(key)?,
+        crate::application::viewer_shortcuts::modifiers(modifiers),
     )
 }
 
@@ -1513,7 +1513,7 @@ const CURSOR_HIDE_GRACE: Duration = Duration::from_millis(600);
 /// Decode the remote cursor PNG into a texture, with its size and hotspot.
 fn decode_cursor(
     ctx: &egui::Context,
-    image: &crate::remote_cursor::CursorImage,
+    image: &crate::features::remote_cursor::CursorImage,
 ) -> Option<(egui::TextureHandle, [u32; 2], [u32; 2])> {
     if image.png.is_empty() {
         return None;

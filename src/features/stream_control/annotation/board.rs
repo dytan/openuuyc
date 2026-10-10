@@ -30,7 +30,7 @@ pub(super) fn complete(a: &mut Annotation) {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-struct Metrics {
+pub(super) struct Metrics {
     width: u32,
     height: u32,
     dpi: u32,

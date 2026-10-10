@@ -264,10 +264,9 @@ impl Manager {
         {
             self.offered = true;
             let remember = (|| -> anyhow::Result<bool> {
-                let path = std::path::PathBuf::from(
-                    std::env::var_os("LOCALAPPDATA").context("本地设置目录不可用")?,
-                )
-                .join("OpenUUYC/resident-install-prompt.seen");
+                let path = crate::paths::app_data_dir()
+                    .context("本地设置目录不可用")?
+                    .join("resident-install-prompt.seen");
                 let seen = path.exists();
                 if !seen {
                     std::fs::create_dir_all(path.parent().unwrap())?;

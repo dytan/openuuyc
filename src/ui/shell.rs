@@ -1,7 +1,7 @@
 use super::gfx::{UiPresenter, create_device, split_output};
 use super::window_manager::{self, Event, Repaint, Request};
 use super::{AppFactory, AppSession, WindowConfig};
-use crate::viewer::presenter::ConnectingWindowsRunner;
+use crate::application::viewer::windows_presenter::ConnectingWindowsRunner;
 use anyhow::{Context, Result, anyhow, bail};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -19,9 +19,9 @@ pub(super) fn run(config: WindowConfig, factory: AppFactory) -> Result<()> {
     let mut builder = EventLoop::<Event>::with_user_event();
     // The Windows keyboard hook needs to see raw messages before winit does.
     #[cfg(windows)]
-    builder.with_msg_hook(crate::viewer::desktop_input_message);
+    builder.with_msg_hook(crate::application::viewer::desktop_input_message);
     let event_loop = builder.build().context("create desktop event loop")?;
-    let _input_hook = crate::viewer::desktop_input_hook()?;
+    let _input_hook = crate::application::viewer::desktop_input_hook()?;
     let mut runner = Windows {
         main: Runner {
             config,
@@ -40,7 +40,7 @@ pub(super) fn run(config: WindowConfig, factory: AppFactory) -> Result<()> {
         .run_app(&mut runner)
         .context("run desktop event loop")?;
     window_manager::install(None);
-    crate::clipboard::shutdown();
+    crate::features::clipboard::shutdown();
     if let Some(error) = runner.main.error.take() {
         bail!(error);
     }

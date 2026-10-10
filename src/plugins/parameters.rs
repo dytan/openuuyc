@@ -266,7 +266,7 @@ impl Fields {
                             _=>None,
                         };
                         if let Some((key,modifiers))=recorded {
-                            let win=unsafe{windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(91)<0 || windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(92)<0};
+                            let win=crate::plugins::async_key_down(91)||crate::plugins::async_key_down(92);
                             let binding=super::hotkeys::Binding{key,modifiers:u8::from(modifiers.ctrl)|(u8::from(modifiers.shift)<<1)|(u8::from(modifiers.alt)<<2)|(u8::from(win)<<3)};
                             if !super::hotkeys::valid(&binding){continue;}
                             shortcut.binding=Some(binding);shortcut.disabled=false;

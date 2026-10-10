@@ -10,7 +10,7 @@ use cros_libva::{
     VAImageFormat, VAProfile, VASurfaceID,
 };
 
-use crate::decoder::platform::DecodeError;
+use crate::media::decode_api::DecodeError;
 
 /// NV12 (8-bit 4:2:0) is the only layout this backend reads back today.
 const RT_FORMAT_YUV420: u32 = cros_libva::VA_RT_FORMAT_YUV420;

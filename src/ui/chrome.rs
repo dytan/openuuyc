@@ -1,26 +1,46 @@
 //! Shared borderless window chrome and native fallback background.
 use super::controls::{ViewerCaptionIcon as TitleIcon, viewer_caption_button as title_icon_button};
+#[cfg(windows)]
 use super::d3d11::window_hwnd;
+#[cfg(windows)]
 use anyhow::Result;
 use std::time::{Duration, Instant};
+#[cfg(windows)]
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+#[cfg(windows)]
 use windows::Win32::Graphics::Dwm::{
     DWMWA_BORDER_COLOR, DWMWA_COLOR_NONE, DWMWA_USE_IMMERSIVE_DARK_MODE,
     DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DWMWCP_ROUNDSMALL, DwmSetWindowAttribute,
 };
+#[cfg(windows)]
 use windows::Win32::Graphics::Gdi::{
     DC_BRUSH, FillRect, GetDC, GetMonitorInfoW, GetStockObject, HBRUSH, HDC,
     MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint, ReleaseDC, SetDCBrushColor,
 };
+#[cfg(windows)]
 use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
+#[cfg(windows)]
 use windows::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
+#[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+#[cfg(windows)]
 use windows::Win32::UI::WindowsAndMessaging::{
     GetClientRect, WM_ERASEBKGND, WM_MOVING, WM_NCCALCSIZE, WM_NCDESTROY,
 };
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::window::{Fullscreen, ResizeDirection, Window};
 
+// X11/Wayland window moves and resizes go through the compositor.
+#[cfg(not(windows))]
+#[path = "chrome_native_linux.rs"]
+mod native;
+#[cfg(not(windows))]
+pub(crate) use native::{
+    WindowMoveState, WindowResizeState, cancel_pointer_operation, configure_dwm_window,
+    update_nonmodal_window_move, update_nonmodal_window_resize,
+};
+
+#[cfg(windows)]
 const BACKDROP_SUBCLASS: usize = 0x4f555542;
 
 pub(crate) struct TitleBarAlert {
@@ -28,6 +48,7 @@ pub(crate) struct TitleBarAlert {
     pub duration: String,
 }
 
+#[cfg(windows)]
 pub(crate) fn cancel_pointer_operation(
     moving: &mut WindowMoveState,
     resizing: &mut WindowResizeState,
@@ -324,6 +345,7 @@ pub(crate) fn set_fullscreen(window: &Window, fullscreen: Option<Fullscreen>) {
     // Publish the target before winit synchronously changes styles/bounds.
     // Its undecorated WM_NCCALCSIZE path otherwise clamps an IsZoomed HWND
     // to rcWork even when the requested bounds cover the complete monitor.
+    #[cfg(windows)]
     if let Err(error) = prepare_window_background(window, fullscreen.is_some()) {
         tracing::warn!(%error, "prepare fullscreen client area");
     }
@@ -331,6 +353,7 @@ pub(crate) fn set_fullscreen(window: &Window, fullscreen: Option<Fullscreen>) {
     configure_dwm_window(window);
 }
 
+#[cfg(windows)]
 pub(crate) fn configure_dwm_window(window: &Window) {
     if let Err(error) = prepare_window_background(window, window.fullscreen().is_some()) {
         tracing::warn!(%error, "prepare window background");
@@ -373,6 +396,7 @@ pub(crate) fn configure_dwm_window(window: &Window) {
     }
 }
 
+#[cfg(windows)]
 fn prepare_window_background(window: &Window, fullscreen: bool) -> Result<()> {
     anyhow::ensure!(
         unsafe {
@@ -395,6 +419,7 @@ fn prepare_window_background(window: &Window, fullscreen: bool) -> Result<()> {
     Ok(())
 }
 
+#[cfg(windows)]
 unsafe extern "system" fn backdrop_proc(
     hwnd: HWND,
     message: u32,
@@ -436,6 +461,7 @@ unsafe extern "system" fn backdrop_proc(
     }
 }
 
+#[cfg(windows)]
 unsafe fn paint_backdrop(hwnd: HWND, dc: HDC) {
     unsafe {
         let mut rect = RECT::default();
@@ -545,11 +571,13 @@ pub(crate) fn resize_regions(
     }
 }
 
+#[cfg(windows)]
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct WindowMoveState {
     start: Option<(POINT, PhysicalPosition<i32>)>,
 }
 
+#[cfg(windows)]
 pub(crate) fn constrain_drag_position(
     position: PhysicalPosition<i32>,
     cursor: POINT,
@@ -568,6 +596,7 @@ pub(crate) fn constrain_drag_position(
     }
 }
 
+#[cfg(windows)]
 pub(crate) fn update_nonmodal_window_move(
     ctx: &egui::Context,
     window: &Window,
@@ -651,6 +680,7 @@ fn title_bar_height_at_scale(scale: f64) -> u32 {
     (f64::from(title_bar_height()) * scale).ceil().max(1.0) as u32
 }
 
+#[cfg(windows)]
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct WindowResizeState {
     start: Option<WindowResizeStart>,
@@ -658,6 +688,7 @@ pub(crate) struct WindowResizeState {
     pub(crate) requested_render_size: Option<PhysicalSize<u32>>,
 }
 
+#[cfg(windows)]
 #[derive(Clone, Copy, Debug)]
 struct WindowResizeStart {
     cursor: POINT,
@@ -666,6 +697,7 @@ struct WindowResizeStart {
     direction: ResizeDirection,
 }
 
+#[cfg(windows)]
 pub(crate) fn update_nonmodal_window_resize(
     ctx: &egui::Context,
     window: &Window,
@@ -711,6 +743,7 @@ pub(crate) fn update_nonmodal_window_resize(
     }
 }
 
+#[cfg(windows)]
 fn apply_absolute_resize(
     window: &Window,
     start: WindowResizeStart,

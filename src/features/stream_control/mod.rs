@@ -436,6 +436,8 @@ struct StreamControlState {
         tokio::sync::watch::Sender<Option<crate::features::viewing_settings::DevicePreferences>>,
     device_persistence_error: Option<String>,
     restore_input_pending: bool,
+    /// Connection setting: treat control as enabled for every device.
+    auto_mouse_control: bool,
     remote_cursor: crate::features::remote_cursor::RemoteCursorState,
     peer_mouse_relative: Option<bool>,
     cursor_sync_needed: bool,
@@ -510,11 +512,15 @@ impl StreamControlHandle {
             annotation_extension: None,
             custom_bitrate_limit: MAX_CUSTOM_BITRATE_MBPS,
             features: None,
-            device_preferences: Default::default(),
+            device_preferences: crate::features::viewing_settings::DevicePreferences {
+                control_enabled: profile.auto_mouse_control,
+                ..Default::default()
+            },
             device_preferences_loaded: false,
             device_preference_updates: tokio::sync::watch::channel(None).0,
             device_persistence_error: None,
             restore_input_pending: false,
+            auto_mouse_control: profile.auto_mouse_control,
             remote_notice: None,
             remote_cursor: cursor.clone(),
             peer_mouse_relative: None,

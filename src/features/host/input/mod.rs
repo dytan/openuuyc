@@ -1,7 +1,10 @@
 //! Authenticated controlled-session input ownership.
+#[cfg_attr(target_os = "linux", path = "backend_linux.rs")]
 mod backend;
+#[cfg_attr(target_os = "linux", path = "broker_linux.rs")]
 pub(crate) mod broker;
 pub(crate) mod config;
+#[cfg_attr(target_os = "linux", path = "engine_linux.rs")]
 mod engine;
 pub(crate) mod wire;
 

@@ -1,4 +1,7 @@
 use super::*;
+#[cfg(not(windows))]
+use crate::platform::linux::CommandExt;
+#[cfg(windows)]
 use std::os::windows::{io::AsRawHandle, process::CommandExt};
 use std::{
     io::BufRead,
@@ -10,6 +13,7 @@ use std::{
     thread::JoinHandle,
     time::{Duration, Instant},
 };
+#[cfg(windows)]
 use windows::Win32::{
     Foundation::{CloseHandle, HANDLE, WAIT_ABANDONED, WAIT_OBJECT_0},
     System::{
@@ -456,7 +460,9 @@ fn validate(rendered: &sdk::Rendered) -> Result<()> {
     }
     Ok(())
 }
+#[cfg(windows)]
 pub(super) struct Job(HANDLE);
+#[cfg(windows)]
 impl Job {
     pub(super) fn attach(child: &Child) -> Result<Self> {
         let job = Self(unsafe { CreateJobObjectW(None, None) }?);
@@ -474,6 +480,7 @@ impl Job {
         Ok(job)
     }
 }
+#[cfg(windows)]
 impl Drop for Job {
     fn drop(&mut self) {
         unsafe {
@@ -481,7 +488,9 @@ impl Drop for Job {
         }
     }
 }
+#[cfg(windows)]
 pub(super) struct AnalysisSlot(HANDLE);
+#[cfg(windows)]
 impl AnalysisSlot {
     pub fn acquire() -> Result<Self> {
         for index in 1..=4 {
@@ -501,11 +510,51 @@ impl AnalysisSlot {
         anyhow::bail!("同时运行的分析分支已达到4个")
     }
 }
+#[cfg(windows)]
 impl Drop for AnalysisSlot {
     fn drop(&mut self) {
         unsafe {
             let _ = ReleaseMutex(self.0);
             let _ = CloseHandle(self.0);
         }
+    }
+}
+#[cfg(not(windows))]
+pub(super) struct Job(u32);
+#[cfg(not(windows))]
+impl Job {
+    /// Plugin hosts die with the client: the drop kills the child, like a
+    /// kill-on-close job object.
+    pub(super) fn attach(child: &Child) -> Result<Self> {
+        Ok(Self(child.id()))
+    }
+}
+#[cfg(not(windows))]
+impl Drop for Job {
+    fn drop(&mut self) {
+        // SAFETY: kill(2) has no memory-safety preconditions.
+        unsafe {
+            libc::kill(self.0 as libc::pid_t, libc::SIGKILL);
+        }
+    }
+}
+#[cfg(not(windows))]
+pub(super) struct AnalysisSlot(std::fs::File);
+#[cfg(not(windows))]
+impl AnalysisSlot {
+    pub fn acquire() -> Result<Self> {
+        for index in 1..=4 {
+            let path = crate::paths::session_lock_path(&format!("analysis-plugin-{index}"));
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&path)?;
+            if file.try_lock().is_ok() {
+                return Ok(Self(file));
+            }
+        }
+        anyhow::bail!("同时运行的分析分支已达到4个")
     }
 }

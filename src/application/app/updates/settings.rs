@@ -13,9 +13,7 @@ pub(super) struct Settings {
 impl Settings {
     fn path() -> Result<PathBuf> {
         Ok(
-            PathBuf::from(std::env::var_os("LOCALAPPDATA").context("LOCALAPPDATA unavailable")?)
-                .join("OpenUUYC")
-                .join("updates.json"),
+            crate::paths::app_data_dir()?.join("updates.json"),
         )
     }
     pub fn load() -> Result<Self> {

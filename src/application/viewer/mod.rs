@@ -28,25 +28,48 @@ mod annotation;
 mod display_transition;
 mod polling_warning;
 
+#[cfg(windows)]
 mod windows_cursor;
 
+#[cfg(windows)]
 mod windows_keyboard;
 
+#[cfg(windows)]
 mod windows_mouse;
+#[cfg(windows)]
 mod windows_drag;
 
+#[cfg(windows)]
 pub(crate) mod windows_presenter;
+// The Linux presenter (winit + wgpu) serves the same entry points, so callers
+// keep using the `windows_presenter` path.
+#[cfg(not(windows))]
+#[path = "linux_presenter.rs"]
+pub(crate) mod windows_presenter;
+
+/// Windows installs a low-level keyboard hook so system keys reach the remote
+/// desktop. X11 and Wayland deliver keys through the focused window instead.
 pub(crate) struct DesktopInputHook {
+    #[cfg(windows)]
     _hook: windows_keyboard::KeyboardHook,
 }
+#[cfg(windows)]
 pub(crate) fn desktop_input_message(message: *const std::ffi::c_void) -> bool {
     windows_keyboard::message(message) || windows_mouse::router().message(message)
 }
 pub(crate) fn desktop_input_hook() -> Result<DesktopInputHook> {
-    windows_keyboard::remove_unused_raw_keyboard()?;
-    windows_keyboard::KeyboardHook::install().map(|hook| DesktopInputHook { _hook: hook })
+    #[cfg(windows)]
+    {
+        windows_keyboard::remove_unused_raw_keyboard()?;
+        windows_keyboard::KeyboardHook::install().map(|hook| DesktopInputHook { _hook: hook })
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(DesktopInputHook {})
+    }
 }
 
+#[cfg(windows)]
 mod windows_ui;
 
 const CONNECTION_PROGRESS_STEPS: u8 = 13;

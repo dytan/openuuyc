@@ -3,11 +3,15 @@ mod access;
 mod allocation;
 pub(crate) mod annotation;
 pub(crate) mod assist;
+#[cfg_attr(target_os = "linux", path = "linux/audio.rs")]
 pub(crate) mod audio;
 mod burst;
+#[cfg_attr(target_os = "linux", path = "clipboard_linux.rs")]
 pub(crate) mod clipboard;
 mod congestion;
+#[cfg_attr(target_os = "linux", path = "linux/desktop.rs")]
 pub(crate) mod desktop;
+#[cfg_attr(target_os = "linux", path = "linux/displays.rs")]
 pub(crate) mod displays;
 mod encoding_settings;
 mod fec;
@@ -16,9 +20,11 @@ pub(crate) mod format;
 mod hevc;
 pub(crate) mod input;
 mod keyframe;
+#[cfg_attr(target_os = "linux", path = "linux/microphone.rs")]
 pub(crate) mod microphone;
 pub(crate) mod network;
 pub(crate) mod parameters;
+#[cfg_attr(target_os = "linux", path = "linux/peer.rs")]
 pub(crate) mod peer;
 pub(crate) mod power;
 mod protection;

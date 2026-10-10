@@ -18,7 +18,7 @@ const MAX_IMAGE_BYTES: u64 = 4 * 1024 * 1024;
 static IO: Mutex<()> = Mutex::new(());
 
 pub(super) fn path(device: &str, url: &str) -> Option<PathBuf> {
-    let root = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
+    let root = crate::paths::app_data_dir().ok();
 
     let root = root.filter(|p| p.is_absolute())?;
     let mut hash = Sha256::new();
@@ -26,7 +26,7 @@ pub(super) fn path(device: &str, url: &str) -> Option<PathBuf> {
     hash.update(device.as_bytes());
     hash.update(url.as_bytes());
     Some(
-        root.join("OpenUUYC/cache/wallpapers/v1")
+        root.join("cache/wallpapers/v1")
             .join(format!("{:x}.png", hash.finalize())),
     )
 }

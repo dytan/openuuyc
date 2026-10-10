@@ -1,5 +1,8 @@
 use super::process::lock;
 use super::*;
+#[cfg(not(windows))]
+use crate::platform::linux::CommandExt;
+#[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::{
     process::{Child, Command, Stdio},
@@ -171,9 +174,12 @@ pub fn host() -> Result<()> {
         let dir = manifest.path.parent().context("plugin directory")?;
         let path = manifest.path.clone();
         ensure!(path.starts_with(dir), "video library outside module");
+        #[cfg(windows)]
         let library: libloading::Library =
             unsafe { libloading::os::windows::Library::load_with_flags(&path, 0x100 | 0x800) }?
                 .into();
+        #[cfg(not(windows))]
+        let library = unsafe { libloading::Library::new(&path) }?;
         let query: libloading::Symbol<sdk::VideoNodeQuery> =
             unsafe { library.get(b"openuuyc_video_node_query_v1\0") }?;
         let api = unsafe { query(sdk::ABI_VERSION, type_id.as_ptr(), type_id.len()) };

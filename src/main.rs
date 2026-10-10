@@ -1,4 +1,4 @@
-#![windows_subsystem = "windows"]
+#![cfg_attr(windows, windows_subsystem = "windows")]
 #![allow(
     non_snake_case,
     reason = "The executable uses the OpenUUYC product name."
@@ -117,6 +117,12 @@ enum Commands {
         /// 传输策略：auto、p2p 或 relay
         #[arg(long)]
         transport: Option<media::TransportChoice>,
+        /// 连接后是否自动开启键鼠控制
+        #[arg(long, action = clap::ArgAction::Set)]
+        auto_mouse_control: Option<bool>,
+        /// 是否默认开启剪贴板文件复制
+        #[arg(long, action = clap::ArgAction::Set)]
+        clipboard_files: Option<bool>,
     },
     /// 恢复保存的登录态，或进行二维码登录
     Login,
@@ -181,6 +187,8 @@ fn main() -> Result<()> {
         codec: None,
         hardware_decode: None,
         transport: None,
+        auto_mouse_control: None,
+        clipboard_files: None,
     });
 
     if let Commands::Notification { uri } = &command {
@@ -294,6 +302,8 @@ fn main() -> Result<()> {
             codec,
             hardware_decode,
             transport,
+            auto_mouse_control,
+            clipboard_files,
         } => {
             let (mut options, startup_warning) = match media::preferences::load() {
                 Ok(options) => (options, None),
@@ -303,6 +313,8 @@ fn main() -> Result<()> {
             if let Some(codec) = codec { options.codec = codec; }
             if let Some(hardware) = hardware_decode { options.decoder.mode = media::selection::DecoderPreference::from_hardware(hardware).mode; }
             if let Some(transport) = transport { options.transport = transport; }
+            if let Some(auto) = auto_mouse_control { options.auto_mouse_control = auto; }
+            if let Some(files) = clipboard_files { options.clipboard_files = files; }
             app::run(app::GuiOptions { background, media: options, startup_warning })
         },
         Commands::Login => {
@@ -340,12 +352,15 @@ fn main() -> Result<()> {
 }
 
 fn attach_parent_console() {
-    use windows::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
+    #[cfg(windows)]
+    {
+        use windows::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
 
-    // Attach before printing clap output. Explorer has no parent console;
-    // inherited STARTF_USESTDHANDLES pipes/files remain redirected on attach.
-    // Never allocate a console just for launching the device center or viewer.
-    let _ = unsafe { AttachConsole(ATTACH_PARENT_PROCESS) };
+        // Attach before printing clap output. Explorer has no parent console;
+        // inherited STARTF_USESTDHANDLES pipes/files remain redirected on attach.
+        // Never allocate a console just for launching the device center or viewer.
+        let _ = unsafe { AttachConsole(ATTACH_PARENT_PROCESS) };
+    }
 }
 
 async fn connect_device(

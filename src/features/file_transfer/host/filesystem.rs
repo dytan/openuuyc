@@ -2,7 +2,7 @@ use super::super::service::PartialFile;
 use super::*;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::os::windows::fs::MetadataExt;
+use crate::platform::fs_ext::MetadataExt;
 use std::{
     fs::{File, OpenOptions},
     io::{Read, Write},

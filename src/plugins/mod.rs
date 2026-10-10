@@ -88,8 +88,7 @@ pub(crate) fn root() -> Result<PathBuf> {
         return Ok(adjacent);
     }
     Ok(
-        PathBuf::from(std::env::var_os("LOCALAPPDATA").context("LOCALAPPDATA unavailable")?)
-            .join("OpenUUYC/plugins"),
+        crate::paths::app_data_dir()?.join("plugins"),
     )
 }
 pub(crate) fn open_folder(path: &Path) -> Result<()> {
@@ -99,26 +98,56 @@ pub(crate) fn open_folder(path: &Path) -> Result<()> {
     // Launch the resolved directory through ShellExecute instead of passing it
     // to explorer.exe as a child-process argument. Explorer may otherwise fall
     // back to its inherited working directory (typically C:\\Users\\<user>).
-    use std::os::windows::ffi::OsStrExt;
-    use windows::{
-        Win32::UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL},
-        core::{PCWSTR, w},
-    };
-    let path: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-    let result = unsafe {
-        ShellExecuteW(
-            None,
-            w!("open"),
-            PCWSTR(path.as_ptr()),
-            None,
-            None,
-            SW_SHOWNORMAL,
-        )
-    };
-    if result.0 as isize <= 32 {
-        anyhow::bail!("打开文件夹失败（{}）", result.0 as isize);
+    #[cfg(not(windows))]
+    crate::platform::linux::open_path(&path)?;
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::{
+            Win32::UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL},
+            core::{PCWSTR, w},
+        };
+        let path: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        let result = unsafe {
+            ShellExecuteW(
+                None,
+                w!("open"),
+                PCWSTR(path.as_ptr()),
+                None,
+                None,
+                SW_SHOWNORMAL,
+            )
+        };
+        if result.0 as isize <= 32 {
+            anyhow::bail!("打开文件夹失败（{}）", result.0 as isize);
+        }
     }
     Ok(())
+}
+/// Physical key state for plugin hotkeys. Linux has no global async key query
+/// that works on Wayland, so bindings fire only from in-window key events.
+pub(crate) fn async_key_down(key: u16) -> bool {
+    #[cfg(windows)]
+    {
+        unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetAsyncKeyState(i32::from(key)) < 0 }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = key;
+        false
+    }
+}
+/// Native handle of the focused top-level window (HWND on Windows). Linux viewers
+/// report 0 as their owner, so the comparison degrades to "lease still valid".
+pub(crate) fn foreground_window() -> u64 {
+    #[cfg(windows)]
+    {
+        unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow() }.0 as u64
+    }
+    #[cfg(not(windows))]
+    {
+        0
+    }
 }
 fn valid_id(id: &str) -> bool {
     !id.is_empty()
@@ -326,10 +355,13 @@ fn load_module(group: &mut Group, m: Manifest) -> Result<usize> {
         library_path.starts_with(directory),
         "插件动态库超出自身目录"
     );
+    #[cfg(windows)]
     let library = unsafe {
         libloading::os::windows::Library::load_with_flags(&library_path, 0x00000100 | 0x00000800)
     }?
     .into();
+    #[cfg(not(windows))]
+    let library = unsafe { libloading::Library::new(&library_path) }?;
     let library: libloading::Library = library;
     let api = if let Some(node) = &m.selected_node {
         let query: libloading::Symbol<sdk::NodeQuery> =

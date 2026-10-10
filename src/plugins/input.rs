@@ -65,12 +65,8 @@ impl Lease {
                             let lease_gate = gate.clone();
                             let epoch = state.1;
                             let valid = Arc::new(move || {
-                                lease_gate.snapshot() == (true, epoch) && unsafe {
-                                    windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow()
-                                }
-                                .0
-                                    as u64
-                                    == owner
+                                lease_gate.snapshot() == (true, epoch)
+                                    && crate::plugins::foreground_window() == owner
                             });
                             if input.begin_assist(owner, t, valid).is_ok() {
                                 token = Some(t);

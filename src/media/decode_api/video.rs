@@ -3,6 +3,9 @@
 #![forbid(unsafe_code)]
 
 use crate::media::VideoCodec;
+#[cfg(not(windows))]
+use crate::platform::surface::ID3D11Device;
+#[cfg(windows)]
 use windows::Win32::Graphics::Direct3D11::ID3D11Device;
 
 /// Decoder selected by the candidate owner; this layer never falls back.

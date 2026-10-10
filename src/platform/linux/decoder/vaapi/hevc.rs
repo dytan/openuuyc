@@ -28,7 +28,7 @@ use oxideav_h265::{
 
 use super::avc::Frame;
 use super::display::{self, Pool};
-use crate::decoder::platform::DecodeError;
+use crate::media::decode_api::DecodeError;
 
 const PICTURE_INVALID: u32 = cros_libva::VA_PICTURE_HEVC_INVALID;
 const PICTURE_LONG_TERM: u32 = cros_libva::VA_PICTURE_HEVC_LONG_TERM_REFERENCE;
@@ -1064,7 +1064,7 @@ mod tests {
     #[test]
     fn decodes_hevc_main_fixture() {
         if !super::super::probe(
-            mediaway_common::CodecKind::Hevc,
+            crate::media::VideoCodec::H265,
             256,
             256,
             8,

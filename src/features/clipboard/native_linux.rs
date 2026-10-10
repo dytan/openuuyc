@@ -24,10 +24,97 @@ const POLL: Duration = Duration::from_millis(400);
 
 pub(super) enum Command {
     Activate(Weak<Inner>),
+    /// Files dropped on the viewer window, offered to the remote as a drag drop.
+    DropFiles(
+        Arc<super::drag::Submission>,
+        PreparedFiles,
+        ClipboardFormatListRequestKind,
+    ),
     Remove(u64),
-    Offer(Weak<Inner>, u64, Vec<ClipboardFormat>),
+    Offer(
+        Weak<Inner>,
+        u64,
+        Vec<ClipboardFormat>,
+        Option<ClipboardFormatListRequestKind>,
+    ),
     Request(Weak<Inner>, u64, i64, ClipboardRequestKind),
     Text(Weak<Inner>, u64, i64, String),
+    /// Files published through a dedicated file session (file transfer UI).
+    PublishFiles(
+        Weak<Inner>,
+        u64,
+        PreparedFiles,
+        tokio::sync::oneshot::Sender<Result<(), String>>,
+    ),
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub(crate) struct FileSummary {
+    pub count: u32,
+    pub bytes: u64,
+    pub first_name: String,
+}
+
+/// A dropped or published file set, walked once up front so the summary and
+/// the descriptor list the remote later reads agree.
+pub(super) struct PreparedFiles {
+    files: LocalFiles,
+    summary: FileSummary,
+}
+
+impl PreparedFiles {
+    pub fn summary(&self) -> FileSummary {
+        self.summary.clone()
+    }
+}
+
+pub(super) fn prepare_files(
+    paths: Vec<PathBuf>,
+    allowed: impl Fn() -> bool,
+) -> Result<PreparedFiles> {
+    ensure!(
+        !paths.is_empty() && paths.len() <= MAX_FILES,
+        "拖放文件数量无效"
+    );
+    for path in &paths {
+        ensure!(allowed(), "文件准备已取消");
+        ensure!(
+            !std::fs::symlink_metadata(path)?.file_type().is_symlink(),
+            "不传输链接"
+        );
+        ensure!(path.file_name().is_some(), "不能拖放根目录");
+    }
+    let files = collect_files(&paths)?;
+    ensure!(allowed(), "文件准备已取消");
+    let mut summary = FileSummary {
+        count: 0,
+        bytes: 0,
+        first_name: String::new(),
+    };
+    for item in &files.items {
+        if item.desc.file_attributes & FILE_ATTRIBUTE_DIRECTORY == 0 {
+            summary.count += 1;
+            summary.bytes = summary.bytes.saturating_add(item.desc.file_size);
+        }
+        if summary.first_name.is_empty() {
+            summary.first_name = item.desc.file_name.clone();
+        }
+    }
+    Ok(PreparedFiles { files, summary })
+}
+
+/// Host-side file offers only exist on Windows; Linux never receives one.
+pub(crate) struct FileOffer(pub(super) std::convert::Infallible);
+
+fn file_links(session: &Inner) -> Vec<Format> {
+    let ids = vec![
+        (
+            formats::register("FileGroupDescriptorW"),
+            "FileGroupDescriptorW".into(),
+        ),
+        (formats::register("FileContents"), "FileContents".into()),
+    ];
+    formats::outgoing(&ids, session.platform.load(Ordering::Acquire), true)
 }
 
 struct Worker {
@@ -272,6 +359,9 @@ struct State {
     generation: u64,
     /// Set while this adapter writes, so the poll does not report its own write.
     writing: bool,
+    /// Per-session file sets from a viewer drop or file publication; they take
+    /// precedence over the local clipboard for the next descriptor request.
+    explicit: HashMap<u64, (Arc<LocalFiles>, Option<Arc<super::drag::Submission>>)>,
 }
 
 pub(super) fn start() -> Result<()> {
@@ -339,6 +429,7 @@ fn run(receiver: Receiver<Command>) {
         offer: None,
         generation: 0,
         writing: false,
+        explicit: HashMap::new(),
     };
     loop {
         match state.receiver.recv_timeout(POLL) {
@@ -367,7 +458,71 @@ fn sessions(state: &State) -> Vec<Arc<Inner>> {
 }
 
 fn process(state: &mut State, command: Command) {
+    for (files, ticket) in state.explicit.values_mut() {
+        if let Some(ticket) = ticket
+            && !ticket.valid()
+            && !files.items.is_empty()
+        {
+            ticket.fail("拖放等待超时或权限已撤销".into());
+            // Keep the rejected publication until its descriptor request
+            // arrives; never substitute ordinary copied files.
+            *files = Arc::new(LocalFiles { items: Vec::new() });
+        }
+    }
     match command {
+        Command::DropFiles(ticket, files, action) => {
+            let result = (|| -> Result<()> {
+                ensure!(ticket.valid(), "文件拖放已过期");
+                let session = ticket.session.upgrade().context("连接已结束")?;
+                let links = file_links(&session);
+                state.published.insert(session.id, links.clone());
+                state.explicit.insert(
+                    session.id,
+                    (Arc::new(files.files), Some(ticket.clone())),
+                );
+                session.emit(
+                    ticket.epoch,
+                    request(
+                        session.next(),
+                        ClipboardRequestKind::FormatList(ClipboardFormatListRequest {
+                            formats: links.into_iter().map(|format| format.wire).collect(),
+                            has_action: 1,
+                            drag_drop_action: Some(action),
+                        }),
+                    ),
+                )?;
+                ticket.published.store(true, Ordering::Release);
+                Ok(())
+            })();
+            if let Err(error) = result {
+                ticket.fail(error.to_string());
+            }
+        }
+        Command::PublishFiles(weak, epoch, files, reply) => {
+            let result = (|| -> Result<()> {
+                let session = weak
+                    .upgrade()
+                    .filter(|session| session.valid(epoch) && session.file_allowed())
+                    .context("文件发布已取消")?;
+                let links = file_links(&session);
+                state.published.insert(session.id, links.clone());
+                state
+                    .explicit
+                    .insert(session.id, (Arc::new(files.files), None));
+                session.emit(
+                    epoch,
+                    request(
+                        session.next(),
+                        ClipboardRequestKind::FormatList(ClipboardFormatListRequest {
+                            formats: links.into_iter().map(|format| format.wire).collect(),
+                            has_action: 0,
+                            drag_drop_action: None,
+                        }),
+                    ),
+                )
+            })();
+            let _ = reply.send(result.map_err(|error| error.to_string()));
+        }
         Command::Activate(weak) => {
             if let Some(session) = weak.upgrade() {
                 state.sessions.insert(session.id, Arc::downgrade(&session));
@@ -388,8 +543,9 @@ fn process(state: &mut State, command: Command) {
         Command::Remove(id) => {
             state.sessions.remove(&id);
             state.published.remove(&id);
+            state.explicit.remove(&id);
         }
-        Command::Offer(weak, epoch, formats) => {
+        Command::Offer(weak, epoch, formats, _action) => {
             if let Some(session) = weak.upgrade().filter(|session| session.valid(epoch))
                 && let Err(error) = accept_offer(state, &session, epoch, formats)
             {
@@ -787,6 +943,14 @@ fn serve(
         ClipboardRequestKind::FileDescListRequest(ask) => {
             let result = (|| -> Result<Arc<LocalFiles>> {
                 ensure!(session.file_allowed(), "文件剪贴板已关闭");
+                if let Some((files, ticket)) = state.explicit.remove(&session.id) {
+                    if let Some(ticket) = &ticket {
+                        ensure!(ticket.valid(), "拖放文件提议已失效");
+                        ticket.handed_off();
+                    }
+                    ensure!(state.tasks.len() < 32, "文件任务过多");
+                    return Ok(files);
+                }
                 ensure!(
                     state.published.contains_key(&session.id),
                     "原文件剪贴板已失效"

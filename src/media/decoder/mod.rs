@@ -1,6 +1,9 @@
 use crate::media::decode_api::{DecodeError, DecoderMode, VideoDecoderConfig};
 use anyhow::{Context, Result, anyhow, bail};
 use bytes::Bytes;
+#[cfg(not(windows))]
+use crate::platform::surface::ID3D11Device;
+#[cfg(windows)]
 use windows::Win32::Graphics::Direct3D11::ID3D11Device;
 use yuv::{YuvBiPlanarImage, YuvConversionMode, YuvRange, YuvStandardMatrix, yuv_nv12_to_rgba};
 
@@ -10,6 +13,7 @@ use crate::protocol::capability::{CodecCapability, DeviceCapability, QUALITY_DIM
 use crate::transport::rtc::EncodedVideoFrame;
 
 pub(crate) mod diagnostics;
+#[cfg_attr(not(windows), path = "software_slot_linux.rs")]
 pub(crate) mod software_slot;
 
 use crate::platform::surface as windows_surface;
@@ -94,6 +98,10 @@ pub(crate) struct NativeVideoDecoder {
 pub(crate) enum DecoderCandidate {
     WindowsD3d11 { adapter: u64 },
 
+    /// VA-API through the local driver (Intel, AMD, or NVIDIA via nvidia-vaapi-driver).
+    #[cfg(not(windows))]
+    LinuxVaapi,
+
     Software,
 }
 
@@ -104,6 +112,10 @@ impl DecoderCandidate {
         preferred: Option<&windows_surface::D3D11SurfaceWriter>,
     ) -> Vec<Self> {
         let mut candidates = Vec::new();
+        #[cfg(not(windows))]
+        if preference.mode.hardware() && matches!(codec, VideoCodec::H264 | VideoCodec::H265) {
+            candidates.push(Self::LinuxVaapi);
+        }
         if preference.mode.hardware() {
             if let Some(writer) = preferred {
                 candidates.push(Self::WindowsD3d11 {
@@ -252,6 +264,30 @@ impl NativeVideoDecoder {
                 Self::open_windows_hardware(codec, width, height, writer, extra_data)
             }
 
+            #[cfg(not(windows))]
+            DecoderCandidate::LinuxVaapi => {
+                if !WindowsVideoDecoder::probe_hardware(codec, width, height, depth, chroma) {
+                    return Err(DecodeError::Unsupported.into());
+                }
+                let config = decoder_config(
+                    codec,
+                    width,
+                    height,
+                    DecoderMode::Hardware,
+                    None,
+                    extra_data,
+                );
+                let decoder = WindowsVideoDecoder::open(&config)?;
+                tracing::info!(?codec, width, height, "opened VA-API hardware decoder");
+                Ok(Self {
+                    decoder: Box::new(decoder),
+                    frame_reader: FrameReader::Cpu,
+                    candidate,
+                    label: format!("{} · VA-API 硬解", platform_label()),
+                    software_slot: None,
+                })
+            }
+
             DecoderCandidate::Software => {
                 if !(openuuyc_codec::Format {
                     codec,
@@ -273,7 +309,8 @@ impl NativeVideoDecoder {
                     extra_data,
                 );
                 let decoder = WindowsVideoDecoder::open(&config)?;
-                let frame_reader = if codec == VideoCodec::Av1 {
+                // Windows uploads software AV1 into D3D11; Linux renders CPU frames.
+                let frame_reader = if cfg!(windows) && codec == VideoCodec::Av1 {
                     FrameReader::Windows(
                         surface_writer.map_or_else(windows_surface::D3D11SurfaceWriter::new, Ok)?,
                     )
@@ -501,6 +538,28 @@ pub(crate) fn detect_native_decoder_support(
                                 break;
                             }
                         }
+                    }
+                }
+            }
+        }
+        #[cfg(not(windows))]
+        if profile.decoder.mode.hardware() {
+            for (codec, id) in [(VideoCodec::H264, 1), (VideoCodec::H265, 2)] {
+                if !profile.codec.accepts(codec) {
+                    continue;
+                }
+                // VA-API frames are read back as NV12: 8-bit 4:2:0 only.
+                for &(width, height) in QUALITY_DIMENSIONS[1..].iter().rev() {
+                    if WindowsVideoDecoder::probe_hardware(codec, width as u32, height as u32, 8, 1) {
+                        capabilities.push(CodecCapability {
+                            video_codec: id,
+                            width,
+                            height,
+                            chroma_sampling: 1,
+                            bit_depth: 8,
+                            codec_impl: 32,
+                        });
+                        break;
                     }
                 }
             }
