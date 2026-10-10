@@ -48,23 +48,15 @@ pub(crate) struct Status {
 pub(crate) struct Receiver;
 
 impl Receiver {
-    pub fn official_drop(&self, catalog: Option<crate::account::feature_ability::FeatureCatalog>) {
-        unreachable!("Windows host only")
-    }
-    pub fn native(&self, enabled: bool) {
-        unreachable!("Windows host only")
-    }
-    pub fn bind_file(&self, channel: &Arc<RTCDataChannel>) {
-        unreachable!("Windows host only")
-    }
-    pub fn close_file(&self, channel: &Arc<RTCDataChannel>) {
-        unreachable!("Windows host only")
-    }
+    pub fn official_drop(&self, catalog: Option<crate::account::feature_ability::FeatureCatalog>) {}
+    pub fn native(&self, enabled: bool) {}
+    pub fn bind_file(&self, channel: &Arc<RTCDataChannel>) {}
+    pub fn close_file(&self, channel: &Arc<RTCDataChannel>) {}
     pub fn receive_file(&self, channel: &Arc<RTCDataChannel>, bytes: &[u8]) -> Result<()> {
         crate::platform::linux::unsupported()
     }
     pub fn bind(&self, channel: u16) -> u64 {
-        unreachable!("Windows host only")
+        0
     }
     pub fn receive(&self, generation: u64, bytes: &[u8]) -> Result<bool> {
         crate::platform::linux::unsupported()
@@ -80,12 +72,10 @@ pub(super) async fn run(
     platform: PeerPlatform,
     input: super::input::Receiver,
     screens: impl Fn() -> (Vec<crate::media::capture::Screen>, bool) + Send + Sync + 'static,
-) {
-    unreachable!("Windows host only")
-}
+) {}
 
-pub(super) fn snapshot(clipboard: &Clipboard) -> Status {
-    unreachable!("Windows host only")
+pub(super) fn snapshot(_clipboard: &Clipboard) -> Status {
+    Status::default()
 }
 
 impl Default for Settings {

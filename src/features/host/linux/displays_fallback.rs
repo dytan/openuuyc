@@ -16,8 +16,8 @@ use serde::{Deserialize, Serialize};
 use std::time::Instant;
 
 pub(super) fn target(output: Output, targets: &[Target]) -> Option<&Target> {
-    unreachable!("Windows host only")
-}
+        None
+    }
 
 pub(crate) fn pin() -> Result<Option<Driver>> {
     crate::platform::linux::unsupported()
@@ -51,6 +51,4 @@ impl Maintainer {
     }
 }
 
-pub(crate) fn start_background() {
-    unreachable!("Windows host only")
-}
+pub(crate) fn start_background() {}

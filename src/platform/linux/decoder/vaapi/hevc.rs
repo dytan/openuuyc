@@ -1073,7 +1073,7 @@ mod tests {
             eprintln!("skip: VA-API HEVC Main unavailable");
             return;
         }
-        let data = include_bytes!("../../../fixtures/hevc.annexb");
+        let data = include_bytes!("../../../../media/decoder/fixtures/hevc.annexb");
         let mut decoder = Hevc::new();
         let cancel = AtomicBool::new(false);
         let mut frames = 0u32;

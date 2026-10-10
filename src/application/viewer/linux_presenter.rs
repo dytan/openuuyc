@@ -613,6 +613,8 @@ struct Player {
     scale: f32,
     /// Last failure from a control request, shown next to the toolbar.
     control_error: Option<String>,
+    /// Files dropped onto the window; winit reports one event per file.
+    pending_drop: Vec<std::path::PathBuf>,
     /// The remote cursor shape, decoded once per distinct image.
     cursor: Option<(usize, egui::TextureHandle, [u32; 2], [u32; 2])>,
     /// Whether the pointer is currently locked to the window for raw motion.
@@ -656,6 +658,7 @@ impl Player {
             physical_buttons: 0,
             scale: window.scale_factor() as f32,
             control_error: None,
+            pending_drop: Vec::new(),
             cursor: None,
             pointer_locked: false,
             focused: true,
@@ -768,7 +771,7 @@ impl Player {
                 );
             });
         }
-        let snapshot = self.session.performance.snapshot();
+        self.flush_drop();
         let mut view = super::stream_menu::LocalViewSettings {
             performance_mode: self.performance_mode,
             performance_always_visible: self
@@ -1190,6 +1193,12 @@ impl Player {
                 }
                 self.input().key(self.owner, key, down, None)
             }
+            WindowEvent::HoveredFile(_) | WindowEvent::HoveredFileCancelled => false,
+            WindowEvent::DroppedFile(path) => {
+                self.pending_drop.push(path.clone());
+                window.request_redraw();
+                true
+            }
             WindowEvent::CursorMoved { position, .. } => {
                 self.last_position = Some(*position);
                 self.pointer_in_video = self.hit_video(context, *position);
@@ -1354,6 +1363,40 @@ impl Player {
             && context
                 .layer_id_at(point)
                 .is_none_or(|layer| layer.order == egui::Order::Background)
+    }
+
+    /// Send files dropped on the window through the official clipboard file
+    /// drop. X11/Wayland report no drop position to winit, so the last pointer
+    /// position over the video is used (the video center otherwise).
+    fn flush_drop(&mut self) {
+        if self.pending_drop.is_empty() {
+            return;
+        }
+        let paths = std::mem::take(&mut self.pending_drop);
+        let Some(rect) = self.video_rect else {
+            self.control_error = Some("画面尚未就绪，无法拖放文件".into());
+            return;
+        };
+        let Some((screen, _, _)) = self.control().mouse_screen(self.session.track_index) else {
+            self.control_error = Some("当前画面不支持拖放文件".into());
+            return;
+        };
+        let scale = f64::from(self.scale_factor());
+        let (x, y) = self
+            .last_position
+            .filter(|_| self.pointer_in_video)
+            .map(|p| {
+                (
+                    ((p.x / scale - f64::from(rect.min.x)) / f64::from(rect.width())).clamp(0.0, 1.0),
+                    ((p.y / scale - f64::from(rect.min.y)) / f64::from(rect.height())).clamp(0.0, 1.0),
+                )
+            })
+            .unwrap_or((0.5, 0.5));
+        let point = crate::protocol::drag_drop::Point { screen, x, y };
+        match self.session.stream_control.drop_files(paths, point) {
+            Ok(_submission) => self.control_error = None,
+            Err(error) => self.control_error = Some(format!("{error:#}")),
+        }
     }
 
     fn send_position(&mut self, position: PhysicalPosition<f64>) {

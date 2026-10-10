@@ -57,10 +57,10 @@ impl Engine {
         crate::platform::linux::unsupported()
     }
     pub fn backend(&self) -> &'static str {
-        unreachable!("Windows host only")
+        ""
     }
     pub fn take_sas(&mut self) -> bool {
-        unreachable!("Windows host only")
+        false
     }
     pub fn configure(&mut self, configuration: super::config::Configuration) -> Result<()> {
         crate::platform::linux::unsupported()
@@ -77,7 +77,7 @@ impl Engine {
         geometry: Geometry,
         permitted: impl Fn() -> bool,
     ) -> Result<()> {
-        unreachable!("Windows host only")
+        crate::platform::linux::unsupported()
     }
     pub fn tick(&mut self) -> Result<()> {
         crate::platform::linux::unsupported()

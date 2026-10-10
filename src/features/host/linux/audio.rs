@@ -104,31 +104,21 @@ impl Audio {
     ) -> Self {
         unreachable!("Windows host only")
     }
-    pub fn enable_quality_control(&self, enabled: bool, audio_only: bool) {
-        unreachable!("Windows host only")
-    }
+    pub fn enable_quality_control(&self, enabled: bool, audio_only: bool) {}
     pub fn quality_hello(&self) -> Option<Vec<u8>> {
-        unreachable!("Windows host only")
+        None
     }
     pub fn quality_request(&self, bytes: &[u8]) -> anyhow::Result<Option<Vec<u8>>> {
         crate::platform::linux::unsupported()
     }
-    pub fn configure(&self, encoding: Option<Config>) {
-        unreachable!("Windows host only")
-    }
-    pub fn set_media_allowed(&self, allowed: bool) {
-        unreachable!("Windows host only")
-    }
+    pub fn configure(&self, encoding: Option<Config>) {}
+    pub fn set_media_allowed(&self, allowed: bool) {}
     pub fn allowed(&self) -> bool {
-        unreachable!("Windows host only")
+        false
     }
-    pub fn transport_lost(&self) {
-        unreachable!("Windows host only")
-    }
+    pub fn transport_lost(&self) {}
     pub fn transmitter(&self) -> &Transmitter {
         unreachable!("Windows host only")
     }
-    pub fn run(&self) {
-        unreachable!("Windows host only")
-    }
+    pub fn run(&self) {}
 }

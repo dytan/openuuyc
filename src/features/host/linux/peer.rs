@@ -83,7 +83,7 @@ impl Peer {
         &self,
         mut candidate: RTCIceCandidateInit,
     ) -> Option<RTCIceCandidateInit> {
-        unreachable!("Windows host only")
+        None
     }
     pub(crate) async fn answer(
         &self,
@@ -91,35 +91,31 @@ impl Peer {
         restart: bool,
         network_type: u8,
     ) -> Result<String> {
-        unreachable!("Windows host only")
+        crate::platform::linux::unsupported()
     }
     pub(crate) async fn add_candidate(&self, mut candidate: RTCIceCandidateInit) -> Result<()> {
         crate::platform::linux::unsupported()
     }
     pub(crate) fn access_revoked(&self) -> bool {
-        unreachable!("Windows host only")
+        false
     }
     pub(crate) fn displays(&self) -> Vec<crate::protocol::capability::DisplayCapability> {
-        unreachable!("Windows host only")
+        Vec::new()
     }
     pub(crate) fn take_prepared_capabilities(&self) -> Option<Vec<super::format::Capability>> {
-        unreachable!("Windows host only")
+        None
     }
     pub(crate) fn ended(&self) -> bool {
-        unreachable!("Windows host only")
+        false
     }
     pub(crate) fn network_change(&self) -> Option<u8> {
-        unreachable!("Windows host only")
+        None
     }
-    pub(crate) async fn close(mut self) {
-        unreachable!("Windows host only")
-    }
+    pub(crate) async fn close(mut self) {}
     pub(crate) fn load_input_configuration(
         &mut self,
         client: crate::session::host_client::HostClient,
-    ) {
-        unreachable!("Windows host only")
-    }
+    ) {}
 }
 
 

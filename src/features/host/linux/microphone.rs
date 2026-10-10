@@ -41,8 +41,8 @@ pub(crate) struct Status {
 }
 
 pub(crate) fn error_code(error: &anyhow::Error) -> i32 {
-    unreachable!("Windows host only")
-}
+        0
+    }
 
 pub(crate) struct Receiver {
     _never: std::convert::Infallible,
@@ -63,9 +63,7 @@ impl Session {
     pub fn receiver(&self) -> Receiver {
         unreachable!("Windows host only")
     }
-    pub fn close(&mut self) {
-        unreachable!("Windows host only")
-    }
+    pub fn close(&mut self) {}
 }
 
 impl Receiver {
@@ -75,13 +73,9 @@ impl Receiver {
     pub fn status(&self) -> tokio::sync::watch::Receiver<Status> {
         unreachable!("Windows host only")
     }
-    pub fn transport_lost(&self) {
-        unreachable!("Windows host only")
-    }
+    pub fn transport_lost(&self) {}
     pub fn select_source(&self) -> u64 {
-        unreachable!("Windows host only")
+        0
     }
-    pub fn receive(&self, generation: u64, data: Bytes, sequence: u16, timestamp: u32) {
-        unreachable!("Windows host only")
-    }
+    pub fn receive(&self, generation: u64, data: Bytes, sequence: u16, timestamp: u32) {}
 }

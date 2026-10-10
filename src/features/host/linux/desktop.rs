@@ -24,21 +24,17 @@ pub(super) struct Cache(tokio::sync::Mutex<Option<Arc<Capabilities>>>);
 
 impl Cache {
     pub fn snapshot(&self) -> Option<Arc<Capabilities>> {
-        unreachable!("Windows host only")
+        None
     }
     pub async fn prepare(
         &self,
         screen: capture::Screen,
         active: impl Fn() -> bool + Send + 'static,
     ) -> Result<Arc<Capabilities>> {
-        unreachable!("Windows host only")
+        crate::platform::linux::unsupported()
     }
-    pub async fn replace(&self, value: Option<Capabilities>) {
-        unreachable!("Windows host only")
-    }
-    pub async fn invalidate(&self) {
-        unreachable!("Windows host only")
-    }
+    pub async fn replace(&self, value: Option<Capabilities>) {}
+    pub async fn invalidate(&self) {}
 }
 
 pub(crate) struct Prepared {

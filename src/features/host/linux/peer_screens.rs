@@ -67,11 +67,9 @@ pub(super) struct Reports {
 }
 
 impl Reports {
-    pub fn notify(&self) {
-        unreachable!("Windows host only")
-    }
+    pub fn notify(&self) {}
     pub fn media(&self) -> Vec<(usize, Published)> {
-        unreachable!("Windows host only")
+        Vec::new()
     }
 }
 
@@ -99,14 +97,10 @@ impl Screens {
     pub(crate) async fn prepare_video(&mut self) -> Result<Option<i32>> {
         crate::platform::linux::unsupported()
     }
-    pub(crate) fn set_fps_limit(&mut self, limit: u32) {
-        unreachable!("Windows host only")
-    }
-    pub(crate) fn set_media_default(&mut self, config: VideoConfig) {
-        unreachable!("Windows host only")
-    }
+    pub(crate) fn set_fps_limit(&mut self, limit: u32) {}
+    pub(crate) fn set_media_default(&mut self, config: VideoConfig) {}
     pub(crate) fn handshake_source(&self) -> Option<capture::Screen> {
-        unreachable!("Windows host only")
+        None
     }
     pub(crate) fn authorization(&self) -> Lease {
         unreachable!("Windows host only")
@@ -129,16 +123,16 @@ impl Screens {
         crate::platform::linux::unsupported()
     }
     pub(super) fn inventory_revision(&self) -> u64 {
-        unreachable!("Windows host only")
+        0
     }
     pub(crate) fn info(&self, id: i32) -> Result<ScreenInfo> {
         crate::platform::linux::unsupported()
     }
     pub(crate) fn active_slot(&self, id: i32) -> Option<usize> {
-        unreachable!("Windows host only")
+        None
     }
     pub(crate) fn available_slot(&self) -> Option<usize> {
-        unreachable!("Windows host only")
+        None
     }
     pub(crate) async fn register(&mut self, indices: &[i32]) -> Result<()> {
         crate::platform::linux::unsupported()
@@ -152,7 +146,5 @@ impl Screens {
     pub(super) async fn maintain(&mut self, revision: u64, inventory: Inventory) -> Result<()> {
         crate::platform::linux::unsupported()
     }
-    pub(super) async fn close(&mut self) {
-        unreachable!("Windows host only")
-    }
+    pub(super) async fn close(&mut self) {}
 }

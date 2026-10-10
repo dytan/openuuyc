@@ -25,16 +25,16 @@ impl Backend {
         require_service: bool,
         permitted: impl Fn() -> bool,
     ) -> Result<Self> {
-        unreachable!("Windows host only")
+        crate::platform::linux::unsupported()
     }
     pub fn service(&self) -> bool {
-        unreachable!("Windows host only")
+        false
     }
     pub fn healthy(&self) -> bool {
-        unreachable!("Windows host only")
+        false
     }
     pub fn backend(&self) -> &str {
-        unreachable!("Windows host only")
+        ""
     }
     pub fn apply(
         &mut self,
@@ -42,7 +42,7 @@ impl Backend {
         geometry: Geometry,
         permitted: impl Fn() -> bool,
     ) -> Result<()> {
-        unreachable!("Windows host only")
+        crate::platform::linux::unsupported()
     }
     pub fn release(&mut self) -> Result<()> {
         crate::platform::linux::unsupported()

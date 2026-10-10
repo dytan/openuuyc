@@ -28,7 +28,7 @@ pub(crate) struct Watchdog {
 
 impl Driver {
     pub(crate) fn device_instance() -> Result<String> {
-        unreachable!("Windows host only")
+        crate::platform::linux::unsupported()
     }
     pub(crate) fn open() -> Result<Self> {
         crate::platform::linux::unsupported()
@@ -37,7 +37,7 @@ impl Driver {
         crate::platform::linux::unsupported()
     }
     pub(crate) fn persistent_supported(&self) -> bool {
-        unreachable!("Windows host only")
+        false
     }
     pub(crate) fn add_fallback(&self, width: u32, height: u32, hz: u32) -> Result<Output> {
         crate::platform::linux::unsupported()
@@ -49,7 +49,7 @@ impl Driver {
         crate::platform::linux::unsupported()
     }
     pub(crate) fn owns_fallback_pin(&self) -> bool {
-        unreachable!("Windows host only")
+        false
     }
     pub(crate) fn fallback_state(&self) -> Result<(Option<Output>, u32)> {
         crate::platform::linux::unsupported()

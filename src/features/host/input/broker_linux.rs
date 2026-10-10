@@ -22,13 +22,13 @@ impl Remote {
         policy: super::wire::Policy,
         permitted: impl Fn() -> bool,
     ) -> Result<Option<Self>> {
-        unreachable!("Windows host only")
+        crate::platform::linux::unsupported()
     }
     pub fn backend(&self) -> &str {
-        unreachable!("Windows host only")
+        ""
     }
     pub fn healthy(&self) -> bool {
-        unreachable!("Windows host only")
+        false
     }
     pub fn apply(
         &mut self,
@@ -36,7 +36,7 @@ impl Remote {
         geometry: Geometry,
         permitted: impl Fn() -> bool,
     ) -> Result<()> {
-        unreachable!("Windows host only")
+        crate::platform::linux::unsupported()
     }
     pub fn release(&mut self) -> Result<()> {
         crate::platform::linux::unsupported()
@@ -60,9 +60,9 @@ pub(crate) fn agent(name: &str, parent: u32) -> Result<()> {
 }
 
 pub(crate) fn serve(pipe: &str, permitted: impl Fn() -> bool) -> Result<()> {
-    unreachable!("Windows host only")
-}
+        crate::platform::linux::unsupported()
+    }
 
 pub(super) fn secure_attention(permitted: impl Fn() -> bool) -> Result<()> {
-    unreachable!("Windows host only")
-}
+        crate::platform::linux::unsupported()
+    }

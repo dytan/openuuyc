@@ -52,7 +52,7 @@ impl Session {
         crate::platform::linux::unsupported()
     }
     pub(crate) fn owns(&self, identity: &str) -> bool {
-        unreachable!("Windows host only")
+        false
     }
     pub(crate) async fn create(&self, resolutions: Vec<(u32, u32)>) -> Result<capture::Screen> {
         crate::platform::linux::unsupported()
@@ -70,7 +70,7 @@ impl Session {
         crate::platform::linux::unsupported()
     }
     pub(crate) fn allows_fallback_retirement(&self) -> bool {
-        unreachable!("Windows host only")
+        false
     }
     pub(crate) async fn retire_fallback(&self, replacement: String) -> Result<bool> {
         crate::platform::linux::unsupported()

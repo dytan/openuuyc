@@ -97,7 +97,7 @@ impl Topology {
 
 impl SavedTopology {
     pub(crate) fn apply(&self) -> Result<Vec<String>> {
-        unreachable!("Windows host only")
+        crate::platform::linux::unsupported()
     }
 }
 
@@ -110,7 +110,7 @@ impl Target {
         crate::platform::linux::unsupported()
     }
     pub(crate) fn set_dpi(&self, requested: u32, active: impl Fn() -> bool) -> Result<()> {
-        unreachable!("Windows host only")
+        crate::platform::linux::unsupported()
     }
     pub(crate) fn set_resolution(
         &self,
@@ -118,6 +118,6 @@ impl Target {
         height: u32,
         active: impl Fn() -> bool,
     ) -> Result<()> {
-        unreachable!("Windows host only")
+        crate::platform::linux::unsupported()
     }
 }
