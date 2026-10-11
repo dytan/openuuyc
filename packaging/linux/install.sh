@@ -79,8 +79,20 @@ install -m 755 "${BIN_SRC}" "${ROOT}/bin/OpenUUYC"
 # Convenience lowercase name on PATH
 ln -sfn OpenUUYC "${ROOT}/bin/openuuyc"
 
-# Desktop entry: keep Exec as basename so PATH lookup works under PREFIX/bin
+# Desktop entry: system prefixes keep Exec as a basename for PATH lookup. A
+# per-user prefix pins the absolute path: otherwise an older system package in
+# /usr/bin wins the PATH lookup, and an older build cannot read credentials a
+# newer one has migrated (e.g. "unsupported native-identity schema").
 install -m 644 "${DESKTOP_SRC}" "${ROOT}/share/applications/openuuyc.desktop"
+case "${PREFIX}" in
+  /usr|/usr/local) ;;
+  *)
+    if [[ -z "${DESTDIR}" ]]; then
+      sed -i "s|^Exec=OpenUUYC |Exec=${PREFIX}/bin/OpenUUYC |" \
+        "${ROOT}/share/applications/openuuyc.desktop"
+    fi
+    ;;
+esac
 
 if [[ -n "${ICONS_SRC}" ]]; then
   install -d "${ROOT}/share/icons/hicolor"
@@ -114,6 +126,20 @@ echo "  ${ROOT}/bin/OpenUUYC"
 echo "  ${ROOT}/bin/openuuyc -> OpenUUYC"
 echo "  ${ROOT}/share/applications/openuuyc.desktop"
 [[ -n "${ICONS_SRC}" ]] && echo "  ${ROOT}/share/icons/hicolor/*/apps/openuuyc.png"
+# Warn when another OpenUUYC shadows this one on PATH with a different version.
+if [[ -z "${DESTDIR}" ]] && command -v OpenUUYC >/dev/null 2>&1; then
+  found="$(command -v OpenUUYC)"
+  if [[ "${found}" != "${ROOT}/bin/OpenUUYC" ]]; then
+    have="$("${found}" --version 2>/dev/null || true)"
+    want="$("${ROOT}/bin/OpenUUYC" --version 2>/dev/null || true)"
+    if [[ "${have}" != "${want}" ]]; then
+      echo
+      echo "warning: '${found}' (${have:-unknown}) comes first on PATH, not ${want:-this build}." >&2
+      echo "         Remove or upgrade it (e.g. 'sudo pacman -R openuuyc' or install the new package)." >&2
+    fi
+  fi
+fi
+
 echo
 echo "Ensure ${PREFIX}/bin is on PATH, then launch via the app launcher as \"OpenUUYC\","
 echo "or run: OpenUUYC gui"
