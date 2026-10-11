@@ -92,6 +92,34 @@ impl Session {
     }
 }
 
+/// Encode-validation helper: decode a short Annex-B access-unit sequence through
+/// the VA-API decoder, returning how many frames came back. Used by the host
+/// encoder's self-check and `host-selftest --bench`.
+pub(super) fn decode_roundtrip(
+    width: u32,
+    height: u32,
+    units: &[Vec<u8>],
+) -> Result<usize, DecodeError> {
+    use crate::media::decode_api::{DecoderMode, VideoDecoderConfig};
+    let config = VideoDecoderConfig {
+        codec: CodecKind::H264,
+        width,
+        height,
+        mode: DecoderMode::Hardware,
+        gpu_device: None,
+        extra_data: bytes::Bytes::new(),
+    };
+    let mut session = Session::open(&config)?;
+    let cancel = std::sync::atomic::AtomicBool::new(false);
+    let mut frames = 0usize;
+    for unit in units {
+        if session.decode(unit, &cancel).is_ok() {
+            frames += 1;
+        }
+    }
+    Ok(frames)
+}
+
 /// Whether the local driver decodes this codec at this size in hardware.
 pub(super) fn probe(codec: CodecKind, width: u32, height: u32, depth: u8, chroma: u8) -> bool {
     if depth != 8 || chroma != 1 {

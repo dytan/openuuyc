@@ -57,6 +57,13 @@ pub(super) fn capture_loop(
     let mut frame_metadata = std::collections::BTreeMap::new();
     let mut last_diagnostics = None;
     let mut metrics = metrics::Metrics::default();
+    // Publish the pointer over the cursor channel independently of video,
+    // like the Windows host. While this sampler is alive the capture path
+    // excludes the cursor from the frame (host::pointer::available()).
+    let cursor_sampler = crate::platform::linux::host::pointer::Sampler::start(
+        pointer.clone(),
+        f64::from(screen.dpi_scale.unwrap_or(100)) / 100.0,
+    );
 
     while !cancel.is_cancelled() && handle.requested() {
         let iteration_started = Instant::now();
@@ -275,7 +282,13 @@ pub(super) fn capture_loop(
         metrics.capture.record(capture_started.elapsed());
         let captured = captured?;
         let capture_state = desktop.as_ref().context("缺少采集源")?;
-        *lock(&pointer) = capture_state.cursor.clone();
+        // When the separate-cursor sampler owns the pointer, keep the
+        // capture path from overwriting it with the (now empty) composite
+        // cursor state. Without a sampler the frame carries the cursor and
+        // this snapshot stays None.
+        if cursor_sampler.is_none() {
+            *lock(&pointer) = capture_state.cursor.clone();
+        }
         if generation != capture_state.generation {
             generation = capture_state.generation;
             encoder = None;

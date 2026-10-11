@@ -195,8 +195,8 @@ impl Desktop {
         false
     }
     /// Capture, then convert/scale to the encoder size for `quality`/`maximum`.
-    /// The cursor is always composited into the picture (`_cursor` is the
-    /// controller's preference for a separate cursor layer, not offered here).
+    /// On Hyprland the cursor is published separately (see `host::pointer`) and
+    /// excluded from the frame; otherwise it is composited in as a fallback.
     pub fn next(
         &mut self,
         timeout: u32,
@@ -226,7 +226,13 @@ impl Desktop {
         let size = match &mut self.backend {
             Backend::Wayland(copy) => {
                 let grab_started = Instant::now();
-                let grabbed = copy.grab(true, timeout)?;
+                // Match the Windows host: when the separate cursor channel
+                // is available do not composite the pointer into the frame,
+                // so cursor-only moves cause no screen damage and cost
+                // nothing on the video path. Fall back to compositing when
+                // we cannot publish the cursor separately.
+                let overlay_cursor = !super::host::pointer::available();
+                let grabbed = copy.grab(overlay_cursor, timeout)?;
                 grab_dur = grab_started.elapsed();
                 let Some(raw) = grabbed else {
                     self.scratch = out;

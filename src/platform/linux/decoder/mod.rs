@@ -216,3 +216,14 @@ impl Drop for WindowsVideoDecoder {
         self.pending.clear();
     }
 }
+
+/// Decode a short Annex-B access-unit sequence with the VA-API H.264 decoder,
+/// returning the number of frames produced. Used to validate the host VA-API
+/// encoder's output. Returns an error if VA-API decode is unavailable.
+pub(crate) fn vaapi_decode_roundtrip(
+    width: u32,
+    height: u32,
+    units: &[Vec<u8>],
+) -> anyhow::Result<usize> {
+    vaapi::decode_roundtrip(width, height, units).map_err(|e| anyhow::anyhow!("{e:?}"))
+}

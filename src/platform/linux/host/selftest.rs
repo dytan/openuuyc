@@ -187,6 +187,107 @@ pub fn run(bench: Option<u32>) -> Result<String> {
             line!("  若采集/编码分线程并行，上限约 {:.1} fps",
                 1000.0 / pct(&mut grab_ms.clone(), 0.50).max(pct(&mut encode_ms.clone(), 0.50)).max(0.1));
         }
+
+        // VA-API path: encode N frames on the GPU and decode them back with the
+        // software and VA-API decoders to confirm the bitstream is conformant.
+        line!("");
+        match crate::platform::linux::encoder::Encoder::hardware_format(
+            &(),
+            (frame.width, frame.height),
+            Format::AVC,
+            rate,
+            crate::features::host::format::Color::Sdr,
+        ) {
+            Err(e) => {
+                line!("VA-API 编码不可用（将使用软件编码）：{e:#}");
+            }
+            Ok(mut va) => {
+                line!("VA-API 基准：{frames} 帧（采集→转换/上传→GPU编码→解码校验），实现={}", va.implementation());
+                let mut va_grab = Vec::new();
+                let mut va_scale = Vec::new();
+                let mut va_enc = Vec::new();
+                let mut va_bytes = 0usize;
+                let mut units: Vec<Vec<u8>> = Vec::new();
+                let mut va_frames = 0u32;
+                let started = Instant::now();
+                for i in 0..frames {
+                    let Some((f, grab, scale)) = desktop
+                        .next_timed(100, 2, false, false, (1920, 1080))
+                        .context("VA-API 基准采集失败")?
+                    else {
+                        continue;
+                    };
+                    if (f.width, f.height) != (frame.width, frame.height) {
+                        continue;
+                    }
+                    let enc_started = Instant::now();
+                    let force = i % 60 == 0;
+                    let packets = va
+                        .encode_cancellable(
+                            &f.texture,
+                            (i as i64) * 10_000,
+                            force,
+                            &std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                        )
+                        .context("VA-API 基准编码失败")?;
+                    va_enc.push(enc_started.elapsed().as_secs_f64() * 1000.0);
+                    va_grab.push(grab.as_secs_f64() * 1000.0);
+                    va_scale.push(scale.as_secs_f64() * 1000.0);
+                    for p in &packets {
+                        va_bytes += p.data.len();
+                        if units.len() < 240 {
+                            units.push(p.data.clone());
+                        }
+                    }
+                    va_frames += 1;
+                }
+                let elapsed = started.elapsed();
+                // Decode validation (software decoder: strict, authoritative).
+                let mut sw = openuuyc_codec::decoder::Decoder::new(openuuyc_codec::Codec::H264, &[])
+                    .context("创建软件解码器失败")?;
+                let mut sw_errors = 0u32;
+                let mut sw_decoded = 0usize;
+                for u in &units {
+                    match sw.push(u, 0) {
+                        Ok(frames) => sw_decoded += frames.len(),
+                        Err(_) => sw_errors += 1,
+                    }
+                }
+                if std::env::var_os("OPENUUYC_VAAPI_DUMP").is_some() {
+                    for (idx, u) in units.iter().take(2).enumerate() {
+                        let _ = std::fs::write(format!("/tmp/va_unit{idx}.h264"), u);
+                        let mut types = Vec::new();
+                        let mut i = 0usize;
+                        while i + 4 < u.len() {
+                            let sc4 = u[i] == 0 && u[i+1] == 0 && u[i+2] == 0 && u[i+3] == 1;
+                            let sc3 = u[i] == 0 && u[i+1] == 0 && u[i+2] == 1;
+                            if sc4 { types.push(u[i+4] & 0x1f); i += 4; continue; }
+                            if sc3 { types.push(u[i+3] & 0x1f); i += 3; continue; }
+                            i += 1;
+                        }
+                        line!("  unit{idx} len={} 首字节={:02x?} NAL类型={:?}", u.len(), &u[..u.len().min(8)], types);
+                    }
+                }
+                line!("  码流: {} KB", va_bytes / 1024);
+                line!("  screencopy 抓帧: p50 {:.1} ms  p95 {:.1} ms", pct(&mut va_grab.clone(), 0.50), pct(&mut va_grab.clone(), 0.95));
+                line!("  缩放:            p50 {:.1} ms  p95 {:.1} ms", pct(&mut va_scale.clone(), 0.50), pct(&mut va_scale.clone(), 0.95));
+                line!("  转换+上传+编码:  p50 {:.1} ms  p95 {:.1} ms", pct(&mut va_enc.clone(), 0.50), pct(&mut va_enc.clone(), 0.95));
+                let fps = va_frames as f64 / elapsed.as_secs_f64();
+                line!("  串行可达帧率:    {:.1} fps（{} 帧用时 {} ms）", fps, va_frames, elapsed.as_millis());
+                line!("  若采集/编码分线程并行，上限约 {:.1} fps",
+                    1000.0 / pct(&mut va_grab.clone(), 0.50).max(pct(&mut va_enc.clone(), 0.50)).max(0.1));
+                line!("  软件解码校验: 还原 {sw_decoded} 帧, 解码错误 {sw_errors} 个");
+                match crate::platform::linux::decoder::vaapi_decode_roundtrip(frame.width, frame.height, &units) {
+                    Ok(n) => line!("  VA-API 解码校验: 还原 {n} 帧"),
+                    Err(e) => line!("  VA-API 解码校验: 不可用（{e:#}）"),
+                }
+                if sw_errors == 0 && sw_decoded > 0 {
+                    line!("  ✓ VA-API 码流解码干净，可安全启用硬件编码");
+                } else {
+                    line!("  ✗ VA-API 码流解码存在问题，请勿启用硬件编码");
+                }
+            }
+        }
     }
 
     line!("自检完成。真实被控仍需对端控制器连接测试。");
