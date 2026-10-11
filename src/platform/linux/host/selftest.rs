@@ -334,6 +334,19 @@ pub fn run(bench: Option<u32>) -> Result<String> {
                     }
                     let elapsed = started.elapsed();
                     if vp_frames > 0 {
+                        for (idx, u) in vp_units.iter().take(2).enumerate() {
+                            let _ = std::fs::write(format!("/tmp/vpp_unit{idx}.h264"), u);
+                            let mut types = Vec::new();
+                            let mut j = 0usize;
+                            while j + 4 < u.len() {
+                                let sc4 = u[j] == 0 && u[j + 1] == 0 && u[j + 2] == 0 && u[j + 3] == 1;
+                                let sc3 = u[j] == 0 && u[j + 1] == 0 && u[j + 2] == 1;
+                                if sc4 { types.push(u[j + 4] & 0x1f); j += 4; continue; }
+                                if sc3 { types.push(u[j + 3] & 0x1f); j += 3; continue; }
+                                j += 1;
+                            }
+                            line!("  vpp_unit{idx} len={} 首字节={:02x?} NAL类型={:?}", u.len(), &u[..u.len().min(10)], types);
+                        }
                         let mut swd = openuuyc_codec::decoder::Decoder::new(
                             openuuyc_codec::Codec::H264,
                             &[],

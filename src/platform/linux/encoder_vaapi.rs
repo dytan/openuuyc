@@ -153,7 +153,7 @@ impl Encoder {
                 Some(FOURCC_NV12),
                 aligned_w,
                 aligned_h,
-                Some(UsageHint::USAGE_HINT_ENCODER),
+                Some(UsageHint::USAGE_HINT_ENCODER | UsageHint::USAGE_HINT_VPP_WRITE),
                 vec![(), ()],
             )
             .map_err(|e| anyhow::anyhow!("创建 VA-API 编码表面失败: {e}"))?;

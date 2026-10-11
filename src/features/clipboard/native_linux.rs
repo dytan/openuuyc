@@ -545,14 +545,20 @@ fn process(state: &mut State, command: Command) {
             state.published.remove(&id);
             state.explicit.remove(&id);
         }
-        Command::Offer(weak, epoch, formats, _action) => {
-            if let Some(session) = weak.upgrade().filter(|session| session.valid(epoch))
-                && let Err(error) = accept_offer(state, &session, epoch, formats)
-            {
-                // The notice shows the outermost line; the cause is only in
-                // the chain, and it is the part worth reading.
-                tracing::debug!(error = format!("{error:#}"), "接受远端剪贴板失败");
-                session.fail(error.to_string());
+        Command::Offer(weak, epoch, formats, action) => {
+            if let Some(session) = weak.upgrade().filter(|session| session.valid(epoch)) {
+                let result = if let Some(action) = action {
+                    // Mac/Windows viewer drag-onto-video sends OleDrop; AutoSave
+                    // is the host→controller send. Neither has a Wayland OLE
+                    // equivalent, so both land in the user's Downloads folder.
+                    receive_drop(session.clone(), epoch, formats, action)
+                } else {
+                    accept_offer(state, &session, epoch, formats)
+                };
+                if let Err(error) = result {
+                    tracing::debug!(error = format!("{error:#}"), "接受远端剪贴板失败");
+                    session.fail(error.to_string());
+                }
             }
         }
         Command::Text(weak, epoch, id, text) => {
@@ -588,6 +594,113 @@ fn process(state: &mut State, command: Command) {
             }
         }
     }
+}
+
+/// Write an official file-drop (OleDrop / AutoSave) into the user's Downloads
+/// folder. Runs on a worker thread so the native clipboard loop can keep
+/// pumping FileContents responses that `read_file` waits on.
+fn receive_drop(
+    session: Arc<Inner>,
+    epoch: u64,
+    formats: Vec<ClipboardFormat>,
+    action: ClipboardFormatListRequestKind,
+) -> Result<()> {
+    ensure!(session.file_allowed(), "文件剪贴板已关闭");
+    let has_files = formats.iter().any(|f| {
+        formats::incoming(f.clone(), session.platform.load(Ordering::Acquire), true)
+            .is_some_and(|link| link.local == descriptor_format())
+    });
+    ensure!(has_files, "拖放未包含文件");
+    std::thread::Builder::new()
+        .name("linux file drop".into())
+        .spawn(move || {
+            let result = (|| -> Result<()> {
+                const TASK: u32 = 0;
+                let descriptors = session.descriptors(epoch, TASK)?;
+                ensure!(!descriptors.is_empty(), "远端拖放文件列表为空");
+                let dest = match &action {
+                    ClipboardFormatListRequestKind::AutoSave(a) => {
+                        crate::features::file_transfer::import::destination(&a.dest_path)?
+                    }
+                    ClipboardFormatListRequestKind::OleDrop(_) => {
+                        crate::features::file_transfer::import::destination("")?
+                    }
+                };
+                let total = descriptors.len() as u32;
+                let items: Vec<_> = descriptors
+                    .into_iter()
+                    .map(|f| crate::features::file_transfer::import::Item {
+                        directory: f.file_attributes & FILE_ATTRIBUTE_DIRECTORY != 0,
+                        info: crate::features::file_transfer::protocol::FileInfo {
+                            rel_path: f.file_name,
+                            size: f.file_size,
+                            modified_time: f
+                                .last_write_time
+                                .saturating_sub(116444736000000000)
+                                / 10_000_000,
+                        },
+                    })
+                    .collect();
+                let first_name = items
+                    .first()
+                    .map(|i| i.info.rel_path.clone())
+                    .unwrap_or_default();
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()?;
+                let report = runtime.block_on(crate::features::file_transfer::import::receive(
+                    dest,
+                    items,
+                    || session.valid(epoch),
+                    |index, offset, length| {
+                        session.read_file(epoch, TASK, index as u32, offset, length.min(FILE_BLOCK), 2)
+                    },
+                ));
+                let (count, saved, first) = match &report {
+                    Ok(r) => (r.total, r.saved, r.first.clone()),
+                    Err(_) => (total, 0, first_name),
+                };
+                if matches!(&action, ClipboardFormatListRequestKind::AutoSave(_)) {
+                    let _ = session.emit(
+                        epoch,
+                        request(
+                            session.next(),
+                            ClipboardRequestKind::AutoSaveComplete(
+                                DragDropAutoSaveComplete {
+                                    total_count: count,
+                                    success_count: saved,
+                                    first_file_name: first.clone(),
+                                },
+                            ),
+                        ),
+                    );
+                }
+                report?;
+                tracing::info!(
+                    total = count,
+                    saved,
+                    first = %first,
+                    "linux host saved official file drop"
+                );
+                let body = if saved > 1 {
+                    format!("已接收 {saved} 个文件：{first} 等")
+                } else {
+                    format!("已接收文件：{first}")
+                };
+                let _ = std::process::Command::new("notify-send")
+                    .arg("--app-name=OpenUUYC")
+                    .arg("--icon=document-save")
+                    .arg("OpenUUYC 文件拖放")
+                    .arg(body)
+                    .status();
+                Ok(())
+            })();
+            if let Err(error) = result {
+                tracing::warn!(error = format!("{error:#}"), "linux official file drop failed");
+                session.fail(error.to_string());
+            }
+        })?;
+    Ok(())
 }
 
 /// Fetch the best offered format now, because the local clipboard cannot
