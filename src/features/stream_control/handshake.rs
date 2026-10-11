@@ -28,6 +28,62 @@ impl StreamControlHandle {
         self.drive_display_changes(&mut state);
         expire_cursor_request(&mut state);
         self.refresh_mouse_policy(&mut state);
+        #[cfg(not(windows))]
+        self.maybe_secure_desktop_assist(&mut state);
+    }
+
+    /// On the Winlogon/lock secure desktop: ask for the system state once and
+    /// queue a single Ctrl+Alt+Del (SAS) so typed input reaches LogonUI.
+    /// Without the SAS, absolute pointer and keys reach CONTROL while the lock
+    /// screen ignores typing. Opt out with `OPENUUYC_NO_AUTO_CAD=1`.
+    #[cfg(not(windows))]
+    fn maybe_secure_desktop_assist(&self, state: &mut StreamControlState) {
+        if !self.cursor.secure_desktop() {
+            return;
+        }
+        if !state.secure_desktop_query_sent && super::ensure_ready(state).is_ok() {
+            let sequence = state.next_sequence;
+            state.next_sequence = state.next_sequence.wrapping_add(1);
+            let payload =
+                super::wire::encode_envelope(sequence, PbPayload::QuerySystemState(Vec::new()));
+            if self
+                .outgoing
+                .send(super::OutgoingControlMessage {
+                    annotation_generation: None,
+                    sequence,
+                    payload,
+                    protocol: protocol(state),
+                    completion: None,
+                })
+                .is_ok()
+            {
+                state.secure_desktop_query_sent = true;
+                tracing::info!(sequence, "secure desktop: sent QuerySystemState");
+            }
+        }
+        if state.secure_desktop_cad_sent
+            || std::env::var_os("OPENUUYC_NO_AUTO_CAD").is_some_and(|v| v != "0" && !v.is_empty())
+        {
+            return;
+        }
+        if state.mouse.mode() == crate::features::remote_input::MouseMode::View
+            || !state.mouse.windows_sas_supported()
+            || state.mouse.waiting_for_neutral()
+        {
+            return;
+        }
+        match state.mouse.send_ctrl_alt_del(SECURE_DESKTOP_CAD_OWNER) {
+            Ok(()) => {
+                state.secure_desktop_cad_sent = true;
+                tracing::info!(
+                    target: "openuuyc::viewer::input",
+                    "secure desktop: automatic Ctrl+Alt+Del (SAS) queued"
+                );
+            }
+            Err(error) => {
+                tracing::debug!(%error, "secure desktop: automatic Ctrl+Alt+Del deferred");
+            }
+        }
     }
 
     pub(crate) fn set_data_channel_open(&self, label: &str, open: bool) {
@@ -231,8 +287,18 @@ impl StreamControlHandle {
                 lock(&self.shared).clipboard_files_allowed = files.enabled;
             }
             let was_hidden = self.cursor.hidden();
+            let was_secure = self.cursor.secure_desktop();
             let result = self.cursor.receive(bytes);
+            let now_secure = self.cursor.secure_desktop();
             let mut state = lock(&self.shared);
+            if was_secure != now_secure {
+                // Each lock/unlock transition re-arms the assist and resyncs
+                // cursor capture for the new desktop.
+                state.cursor_sync_needed = true;
+                state.secure_desktop_query_sent = false;
+                state.secure_desktop_cad_sent = false;
+                tracing::info!(secure_desktop = now_secure, "secure desktop transition");
+            }
             if was_hidden
                 && !self.cursor.hidden()
                 && smart_mouse_requested(&state)
@@ -438,3 +504,7 @@ impl StreamControlHandle {
         let _ = self.send_locked(state, outgoing, None);
     }
 }
+
+/// Owner id for the automatic SAS, distinct from any viewer window.
+#[cfg(not(windows))]
+const SECURE_DESKTOP_CAD_OWNER: u64 = 0x5EC_00CAD;

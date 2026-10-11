@@ -25,6 +25,8 @@ impl StreamControlHandle {
             state.cursor_sync_needed = false;
             state.cursor_desired_capture = true;
             state.mouse_restore_point = None;
+            state.secure_desktop_query_sent = false;
+            state.secure_desktop_cad_sent = false;
             // Revoke actual input now. A focused, ready viewer may later restore
             // the separately saved intent; held keys/clicks are never replayed.
             state.baseline.cursor_capture = true;
@@ -80,6 +82,11 @@ impl StreamControlHandle {
 
     pub(crate) fn remote_cursor_hidden(&self) -> bool {
         self.cursor.hidden()
+    }
+
+    /// The remote reports its Winlogon secure desktop (lock screen or UAC).
+    pub(crate) fn secure_desktop(&self) -> bool {
+        self.cursor.secure_desktop()
     }
 
     /// Whether the host currently streams its cursor; the Linux player draws the

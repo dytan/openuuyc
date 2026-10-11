@@ -300,6 +300,8 @@ impl RemoteScreen {
 
 #[derive(Clone, Debug)]
 pub struct StreamControlSnapshot {
+    /// The remote is on its Winlogon secure desktop (lock screen or UAC).
+    pub secure_desktop: bool,
     pub hdr_supported: bool,
     pub hdr_unavailable: Option<String>,
     pub custom_bitrate_limit: u32,
@@ -472,6 +474,10 @@ struct StreamControlState {
     initial_capture_sync_sent: bool,
     viewing_enabled: bool,
     next_sequence: i64,
+    /// Lock screen / UAC assist: one QuerySystemState and one Ctrl+Alt+Del per
+    /// secure-desktop entry (Linux viewer only).
+    secure_desktop_query_sent: bool,
+    secure_desktop_cad_sent: bool,
     pending_sequences: VecDeque<i64>,
     last_applied_sequence: Option<i64>,
     latest_requested_sequence: Option<i64>,
@@ -580,6 +586,8 @@ impl StreamControlHandle {
             initial_capture_sync_sent: false,
             viewing_enabled: true,
             next_sequence: 1,
+            secure_desktop_query_sent: false,
+            secure_desktop_cad_sent: false,
             pending_sequences: VecDeque::new(),
             last_applied_sequence: None,
             latest_requested_sequence: None,
@@ -762,6 +770,7 @@ impl StreamControlHandle {
             control_channel_open: state.control_channel_open,
             text_channel_open: state.text_channel_open,
             pb_connected: state.pb_connected,
+            secure_desktop: self.cursor.secure_desktop(),
             ready: waiting_for.is_none()
                 && active_protocol == StreamControlProtocol::CaptureSetting,
             waiting_for,
