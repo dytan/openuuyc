@@ -1,4 +1,11 @@
 //! wlroots-family Wayland screen capture (zwlr_screencopy_manager_v1) and output
+//!
+//! Current path copies into a wl_shm buffer (CPU). GPU VPP scale+CSC is decode-
+//! clean behind OPENUUYC_ZEROCOPY but still shm-bound (~20 ms grab). The next
+//! speedup is zwlr_screencopy linux_dmabuf + gbm → VA DRM_PRIME_2 import into
+//! the VPP source surface (cros-libva already exposes ExternalBufferDescriptor
+//! / MemoryType::DrmPrime2). Keep that path behind the same env var with shm
+//! fallback so the live stream never regresses.
 //! inventory. Hyprland, Sway, river, labwc and Wayfire implement it; GNOME and
 //! KDE need the ScreenCast portal instead, which is not wired up yet.
 use anyhow::{Context, Result, bail, ensure};
