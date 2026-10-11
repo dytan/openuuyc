@@ -29,17 +29,18 @@ use crate::ui::gfx::{UiPresenter, UiTimingAudit, split_output};
 use crate::ui::wgpu_video::VideoPlacement;
 use crate::ui::window_manager::{Event as UiEvent, Repaint as UiRepaintEvent};
 
+use super::linux_chrome::{PlayerChromeAction, PlayerTitleBar, ScreenTabBar, player_title_bar};
+use super::screens::ScreenPlayback;
+use crate::features::stream_control::RemoteScreen;
+
 use super::{
-    ConnectionProgress, ConnectionProgressApp, DecodedVideoFrame, NativeViewerSession,
+    AudioView, ConnectionProgress, ConnectionProgressApp, DecodedVideoFrame, NativeViewerSession,
     PerformancePanelMode, StreamControlUi, ViewerDisplayHandle, ViewerWindowEvent,
     configure_viewer_visuals, mutex_lock, show_stream_control_window,
     take_next_frame,
 };
 
 pub(super) use crate::application::viewer_shortcuts::Action as ViewerShortcut;
-
-/// Space the caption keeps for the brand logo and the device alias.
-const TITLE_CAPTION_WIDTH: f32 = 220.0;
 
 pub(crate) struct ConnectingWindowsRunConfig {
     pub alias: String,
@@ -115,10 +116,14 @@ pub(crate) struct ConnectingWindowsRunner {
     ui_frame_interval: Duration,
     proxy: EventLoopProxy<UiEvent>,
     generation: u64,
+    /// Window size and maximized state to restore when listening ends.
+    audio_restore: Option<(winit::dpi::PhysicalSize<u32>, bool)>,
 }
 
 enum Stage {
     Connecting(Box<ConnectionProgressApp>),
+    /// Audio-only connection: the compact listening panel.
+    Listening(Box<AudioView>),
     Playing(Box<Player>),
     Finished,
 }
@@ -166,6 +171,7 @@ impl ConnectingWindowsRunner {
             proxy,
             embedded,
             generation: 1,
+            audio_restore: None,
         }
     }
 
@@ -284,13 +290,22 @@ impl ConnectingWindowsRunner {
                     self.exit(event_loop);
                     return;
                 }
-                // Audio-only sessions keep the connecting window; Linux has no
-                // dedicated listening layout yet.
-                ViewerWindowEvent::Listening(_) => {}
+                ViewerWindowEvent::Listening(audio) => {
+                    let Some(window) = self.window.clone() else {
+                        return;
+                    };
+                    self.audio_restore
+                        .get_or_insert_with(|| (window.inner_size(), window.is_maximized()));
+                    configure_audio_window(&window, false);
+                    self.stage = Stage::Listening(Box::new(audio));
+                    window.set_visible(true);
+                    self.schedule_now();
+                }
                 ViewerWindowEvent::Playing(session) => {
                     let Some(window) = self.window.clone() else {
                         return;
                     };
+                    self.restore_video_window(&window);
                     match Player::new(*session, &window, self.proxy.clone()) {
                         Ok(player) => {
                             window.set_visible(true);
@@ -310,6 +325,10 @@ impl ConnectingWindowsRunner {
                 } => {
                     self.alias = alias.clone();
                     self.generation += 1;
+                    if let Some(window) = self.window.clone() {
+                        self.restore_video_window(&window);
+                        window.set_title(&format!("{}{}", crate::VIEWER_TITLE_PREFIX, alias));
+                    }
                     let _ = display.send(ViewerDisplayHandle::default());
                     if let Some(shell) = self.shell.as_mut() {
                         shell.presenter.clear_video();
@@ -318,6 +337,15 @@ impl ConnectingWindowsRunner {
                         Stage::Connecting(Box::new(ConnectionProgressApp::new(alias, progress)));
                 }
             }
+        }
+    }
+
+    /// Undo the fixed listening layout before video or a reconnect takes over.
+    fn restore_video_window(&mut self, window: &Window) {
+        if let Some((size, maximized)) = self.audio_restore.take() {
+            restore_video_window_constraints(window);
+            let _ = window.request_inner_size(size);
+            window.set_maximized(maximized);
         }
     }
 
@@ -349,7 +377,11 @@ impl ConnectingWindowsRunner {
         let stage = &mut self.stage;
         let output = shell.context.run_ui(input, |ui| {
             let ctx = ui.ctx().clone();
+            let resizable = !matches!(stage, Stage::Listening(_));
             resize_regions(ui, &window, |response, direction| {
+                if !resizable {
+                    return;
+                }
                 update_nonmodal_window_resize(
                     &ctx,
                     &window,
@@ -361,16 +393,23 @@ impl ConnectingWindowsRunner {
             });
             if window.fullscreen().is_none() {
                 title_bar_panel(ui, "player-window-chrome", title_bar_height(), |ui| {
-                    let bar = ui.available_rect_before_wrap();
-                    close_requested |=
-                        window_title_bar(ui, &window, &title, Some(&mut shell.move_state), true);
                     if let Stage::Playing(player) = stage {
-                        player.title_bar_controls(ui, bar, &window);
+                        close_requested |= player.title_bar(ui, &window, &mut shell.move_state);
+                    } else {
+                        let listening = matches!(stage, Stage::Listening(_));
+                        close_requested |= window_title_bar(
+                            ui,
+                            &window,
+                            &title,
+                            Some(&mut shell.move_state),
+                            !listening,
+                        );
                     }
                 });
             }
             match stage {
                 Stage::Connecting(app) => app.draw(ui),
+                Stage::Listening(audio) => close_requested |= audio.show(ui),
                 Stage::Playing(player) => placement = player.draw(ui, &window),
                 Stage::Finished => {}
             }
@@ -381,6 +420,16 @@ impl ConnectingWindowsRunner {
         // staging copy inside the device -- one video frame's worth, at the
         // video's frame rate, until an allocation finally fails. The frame is
         // still taken, to keep the decoder's queue from growing instead.
+        if let Stage::Listening(audio) = &mut self.stage
+            && let Some(compact) = audio.take_layout_change()
+        {
+            configure_audio_window(&window, compact);
+        }
+        if let Stage::Playing(player) = &mut self.stage
+            && std::mem::take(&mut player.video_reset)
+        {
+            shell.presenter.clear_video();
+        }
         let drawing = window.is_minimized() != Some(true);
         if let Stage::Playing(player) = &mut self.stage
             && let Some(frame) = player.take_frame()
@@ -587,7 +636,28 @@ impl ApplicationHandler<UiEvent> for ConnectingWindowsRunner {
 
 /// The playing half of the window: video, input forwarding and the menus.
 struct Player {
-    session: NativeViewerSession,
+    /// The screen this window shows; replaced when a screen tab is picked.
+    session: Arc<NativeViewerSession>,
+    /// Opens the other screens of this connection and owns their decoders.
+    screens: Option<ScreenPlayback>,
+    tabs: ScreenTabBar,
+    catalog: Vec<RemoteScreen>,
+    selected: Option<i32>,
+    pending: Option<PendingScreen>,
+    /// The last screen that failed to open, as (id, track, type), so the
+    /// catalog refresh does not retry it in a loop.
+    failed_screen: Option<(i32, i32, i32)>,
+    next_refresh: Instant,
+    topology_sequence: Option<i64>,
+    topology_focused: Option<i32>,
+    /// Set after a screen switch; the shell drops the old screen's texture.
+    video_reset: bool,
+    annotation: super::annotation::AnnotationUi,
+    display_transition_visible: bool,
+    /// Local UI owns the picture (annotation, display change, menus).
+    input_blocked: bool,
+    proxy: EventLoopProxy<UiEvent>,
+    window_id: WindowId,
     /// Keeps the decoder publishing frames and nudges the event loop; held for
     /// its lifetime, which is what registers this window with the session.
     #[allow(dead_code, reason = "Owned for its registration and its Drop.")]
@@ -632,15 +702,38 @@ struct Player {
 
 impl Player {
     fn new(
-        session: NativeViewerSession,
+        mut session: NativeViewerSession,
         window: &Arc<Window>,
         proxy: EventLoopProxy<UiEvent>,
     ) -> Result<Self> {
         session.ensure_running()?;
         let owner = u64::from(window.id());
-        let wake = FrameWakeBridge::install(&session, proxy, window.id())?;
+        let screens = session.take_screen_playback();
+        let session = Arc::new(session);
+        if let Some(factory) = &screens {
+            factory.register(Arc::clone(&session));
+        }
+        let wake = FrameWakeBridge::install(&session, proxy.clone(), window.id())?;
         let performance_mode = session.stream_control.device_preferences().performance_mode;
+        let annotation =
+            super::annotation::AnnotationUi::new(session.stream_control.clone(), owner);
+        let selected = Some(session.screen_id());
         Ok(Self {
+            catalog: screens.as_ref().map(ScreenPlayback::screens).unwrap_or_default(),
+            screens,
+            tabs: ScreenTabBar::default(),
+            selected,
+            pending: None,
+            failed_screen: None,
+            next_refresh: Instant::now(),
+            topology_sequence: None,
+            topology_focused: None,
+            video_reset: false,
+            annotation,
+            display_transition_visible: false,
+            input_blocked: false,
+            proxy,
+            window_id: window.id(),
             session,
             wake,
             owner,
@@ -679,6 +772,7 @@ impl Player {
     /// True when a decoded frame is waiting to go up.
     fn poll(&mut self) -> Result<bool> {
         self.confirm_neutral();
+        self.update_screens();
         self.session.ensure_running()?;
         Ok(mutex_lock(&self.session.frame_queue).is_some())
     }
@@ -772,6 +866,10 @@ impl Player {
             });
         }
         self.flush_drop();
+        let ctx = ui.ctx().clone();
+        let screen_id = self.session.screen_id();
+        self.display_transition_visible =
+            super::display_transition::show(&ctx, &self.session.stream_control, screen_id, content);
         let mut view = super::stream_menu::LocalViewSettings {
             performance_mode: self.performance_mode,
             performance_always_visible: self
@@ -783,7 +881,6 @@ impl Player {
             send_ctrl_alt_del: false,
         };
         let display_size = self.display_size();
-        let screen_id = self.session.screen_id();
         show_stream_control_window(
             ui.ctx(),
             &self.session.stream_control,
@@ -816,9 +913,61 @@ impl Player {
             &self.session.stream_control.audio(),
             view.performance_mode,
             view.performance_always_visible,
-            ui.max_rect(),
+            self.video_rect.unwrap_or(content),
             "linux-player",
         );
+        let control = self.session.stream_control.clone();
+        let display_blocked =
+            control.display_input_blocked(self.session.track_index, self.session.screen_binding());
+        self.annotation.draw(
+            ui,
+            screen_id,
+            self.video_rect,
+            self.display_transition_visible
+                || self.tabs.is_pending()
+                || self.stream_control_ui.open
+                || display_blocked,
+            self.focused,
+        );
+        if let Some(upgrade) = control.remote_upgrade() {
+            upgrade.show(&ctx, window.id(), &control);
+        }
+        crate::ui::controls::observe_notice(
+            &ctx,
+            "linux-player-error",
+            "播放器",
+            crate::ui::controls::DialogIcon::Warning,
+            self.control_error.as_deref(),
+        );
+        if self.focused && !self.stream_control_ui.open {
+            super::polling_warning::show(&ctx, control.mouse(), content);
+        }
+        // Local UI that covers the picture owns the input, as on Windows.
+        let blocked = control.annotation_snapshot().enabled
+            || control
+                .remote_upgrade()
+                .is_some_and(|upgrade| upgrade.owns_input(window.id()))
+            || self.display_transition_visible
+            || super::stream_menu::topology_menu::owns_input(&ctx)
+            || ctx.memory(|m| m.top_modal_layer().is_some())
+            || self.tabs.is_pending()
+            || display_blocked
+            || control.pending_display_resolution(screen_id).is_some();
+        if blocked && !self.input_blocked {
+            self.release_keys();
+            self.input().pause_owner(self.owner);
+        }
+        self.input_blocked = blocked;
+        if self.focused
+            && !blocked
+            && !self.stream_control_ui.open
+            && !ctx.any_popup_open()
+            && !ctx.text_edit_focused()
+            && self.current.is_some()
+            && let Err(error) = control.restore_input_control()
+        {
+            control.mouse().fail(error.to_string());
+        }
         self.update_pointer_lock(window);
         self.draw_remote_cursor(ui, window);
         placement
@@ -830,6 +979,11 @@ impl Player {
     /// the shape is drawn where the local pointer is rather than at the position
     /// the remote sampled with it.
     fn draw_remote_cursor(&mut self, ui: &mut egui::Ui, window: &Arc<Window>) {
+        if self.input_blocked {
+            window.set_cursor_visible(true);
+            self.cursor_note("local UI owns the picture");
+            return;
+        }
         if self.pointer_locked {
             // The remote draws its own pointer into the video in this mode.
             self.cursor_note("locked");
@@ -939,87 +1093,85 @@ impl Player {
         self.cursor_note("painted");
     }
 
-    /// The player commands, placed in the window caption between the title and
-    /// the window buttons. The Windows player has the same row.
-    pub(super) fn title_bar_controls(
+    /// The player caption (the Windows player's row); true asks to close.
+    fn title_bar(
         &mut self,
         ui: &mut egui::Ui,
-        bar: egui::Rect,
         window: &Arc<Window>,
-    ) {
-        // Leave the logo and alias on the left and the window buttons on the right.
-        let left = bar.left() + TITLE_CAPTION_WIDTH;
-        let right = bar.right() - crate::ui::theme::WINDOW_CONTROLS_WIDTH - 4.0;
-        if right - left < 120.0 {
+        move_state: &mut WindowMoveState,
+    ) -> bool {
+        let control = self.session.stream_control.clone();
+        let performance = self.session.performance.clone();
+        let title = self.session.title.clone();
+        let action: PlayerChromeAction = player_title_bar(
+            ui,
+            PlayerTitleBar {
+                screens: &mut self.tabs,
+                window,
+                title: &title,
+                performance: &performance,
+                stream_control: &control,
+                stream_control_ui: &mut self.stream_control_ui,
+                move_state,
+            },
+        );
+        if action.toggle_annotation {
+            self.release_keys();
+            self.release_pointer(window);
+            self.stream_control_ui.open = false;
+            let annotation = control.annotation_snapshot();
+            if !annotation.supported
+                && !annotation.enabled
+                && let Some(upgrade) = control.remote_upgrade()
+            {
+                upgrade.prompt(window.id(), "批注");
+            } else {
+                self.annotation.toggle();
+            }
+        }
+        if action.toggle_mouse {
+            let state = control.snapshot();
+            let enable = state.mouse_mode == MouseMode::View && !state.mouse_pending;
+            if enable {
+                crate::ui::controls::clear_notice(ui.ctx(), "remote-input-error");
+            }
+            self.set_control(enable);
+        }
+        if action.one_to_one {
+            self.resize_one_to_one(window);
+        }
+        if action.close {
+            self.release_keys();
+        }
+        action.close
+    }
+
+    /// Size the window so one video pixel is one screen pixel, shrinking to
+    /// the monitor when it does not fit. Compositors may still adjust it.
+    fn resize_one_to_one(&self, window: &Window) {
+        let Some((width, height)) = self.display_size() else {
             return;
-        }
-        let rect = egui::Rect::from_min_max(
-            egui::pos2(left, bar.top()),
-            egui::pos2(
-                right,
-                bar.top() + crate::ui::theme::WINDOW_TITLE_CONTENT_HEIGHT,
-            ),
-        );
-        let mut row = ui.new_child(
-            egui::UiBuilder::new()
-                .max_rect(rect)
-                .layout(egui::Layout::right_to_left(egui::Align::Center)),
-        );
-        row.set_clip_rect(rect);
-        row.spacing_mut().item_spacing.x = 6.0;
-        let controlling = self.input().mode() != MouseMode::View;
-        if row.button("全屏").clicked() {
-            toggle_fullscreen(window);
-        }
-        if row
-            .selectable_label(
-                self.session
-                    .stream_control
-                    .device_preferences()
-                    .performance_always_visible,
-                "性能",
-            )
-            .clicked()
-        {
-            // A caption button shows or hides; the stream menu chooses between
-            // the compact and detailed panels.
-            let visible = self
-                .session
-                .stream_control
-                .device_preferences()
-                .performance_always_visible;
-            self.session
-                .stream_control
-                .set_performance_always_visible(!visible);
-        }
-        if row.button("串流设置").clicked() {
-            self.stream_control_ui.open = !self.stream_control_ui.open;
-        }
-        if row
-            .selectable_label(controlling, "键鼠控制")
-            .on_hover_text(format!(
-                "退出控制：{}",
-                crate::application::viewer_shortcuts::label(ViewerShortcut::ReleaseMouse)
-            ))
-            .clicked()
-        {
-            self.set_control(!controlling);
-        }
-        if let Some(error) = &self.control_error {
-            row.add(
-                egui::Label::new(
-                    egui::RichText::new(error)
-                        .size(crate::ui::theme::SMALL)
-                        .color(crate::ui::theme::DANGER_FILL),
-                )
-                .truncate(),
-            );
-        }
+        };
+        let title = crate::ui::chrome::title_bar_height_pixels(window);
+        let (max_width, max_height) = window
+            .current_monitor()
+            .map(|m| (m.size().width.max(1), m.size().height.max(1)))
+            .unwrap_or((width, height + title));
+        let scale = 1.0_f64
+            .min(f64::from(max_width) / f64::from(width.max(1)))
+            .min(f64::from(max_height.saturating_sub(title).max(1)) / f64::from(height.max(1)));
+        let _ = window.request_inner_size(winit::dpi::PhysicalSize::new(
+            (f64::from(width) * scale).round().max(1.0) as u32,
+            (f64::from(height) * scale).round().max(1.0) as u32 + title,
+        ));
     }
 
     fn set_control(&mut self, enabled: bool) {
         let mode = if enabled {
-            MouseMode::Smart
+            match self.control().snapshot().mouse_preference {
+                MouseMode::View => MouseMode::Smart,
+                preference => preference,
+            }
         } else {
             MouseMode::View
         };
@@ -1071,7 +1223,10 @@ impl Player {
     /// local cursor cannot wander onto another window mid-game.
     fn update_pointer_lock(&mut self, window: &Arc<Window>) {
         let input = self.input();
-        let wanted = self.focused && input.relative_mode() && input.mode() != MouseMode::View;
+        let wanted = self.focused
+            && !self.input_blocked
+            && input.relative_mode()
+            && input.mode() != MouseMode::View;
         if wanted == self.pointer_locked {
             return;
         }
@@ -1132,6 +1287,7 @@ impl Player {
     fn on_focus_changed(&mut self, window: &Arc<Window>, focused: bool) {
         self.focused = focused;
         if !focused {
+            self.annotation.finish();
             self.release_pointer(window);
             // A key released while another window has focus never reaches us.
             self.release_keys();
@@ -1178,7 +1334,7 @@ impl Player {
                 // every key destined for the remote Windows desktop. Only a real
                 // text field should keep keyboard events local.
                 let ui_owns_keys = context.text_edit_focused();
-                if ui_owns_keys || self.input().mode() == MouseMode::View {
+                if ui_owns_keys || self.input_blocked || self.input().mode() == MouseMode::View {
                     return false;
                 }
                 let Some(key) = crate::application::viewer_shortcuts::physical_key(event.physical_key) else {
@@ -1233,7 +1389,7 @@ impl Player {
                 // event as consumed (hovering a previously focused caption
                 // control). Still yield while egui is mid-drag on a widget.
                 let ui_drag = context.egui_is_using_pointer();
-                if self.input().mode() == MouseMode::View {
+                if self.input_blocked || self.input().mode() == MouseMode::View {
                     return false;
                 }
                 if (consumed_by_ui && (ui_drag || !self.pointer_in_video))
@@ -1257,7 +1413,7 @@ impl Player {
                 true
             }
             WindowEvent::MouseWheel { delta, .. } => {
-                if consumed_by_ui || !self.pointer_in_video {
+                if consumed_by_ui || self.input_blocked || !self.pointer_in_video {
                     return false;
                 }
                 let (horizontal, amount) = match delta {
@@ -1401,7 +1557,7 @@ impl Player {
 
     fn send_position(&mut self, position: PhysicalPosition<f64>) {
         let input = self.input();
-        if input.mode() == MouseMode::View || input.waiting_for_neutral() {
+        if self.input_blocked || input.mode() == MouseMode::View || input.waiting_for_neutral() {
             return;
         }
         // Relative mode owns motion only while the pointer is actually locked.
@@ -1465,7 +1621,296 @@ impl Drop for Player {
     fn drop(&mut self) {
         self.release_keys();
         self.input().disable();
+        self.annotation.finish();
+        if let Some(switcher) = &self.tabs.device_switch {
+            switcher.cancel_takeover(self.window_id);
+        }
+        self.pending.take();
+        self.session
+            .stream_control
+            .cancel_display_change(self.session.screen_id());
+        // Every screen decoder this connection opened goes with the window.
+        self.session.close_handle().close();
+        if let Some(factory) = &self.screens {
+            factory.close_decoders();
+        }
     }
+}
+
+/// A screen tab being opened in the background.
+struct PendingScreen {
+    id: i32,
+    task: tokio::task::JoinHandle<()>,
+    result: tokio::sync::oneshot::Receiver<Result<Arc<NativeViewerSession>>>,
+}
+
+impl Drop for PendingScreen {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+impl Player {
+    /// Screen tabs: finish a pending switch, run the picked tab, follow the
+    /// remote topology, and publish the tab row.
+    fn update_screens(&mut self) {
+        if self.screens.is_none() {
+            return;
+        }
+        let ready = self
+            .pending
+            .as_mut()
+            .and_then(|pending| match pending.result.try_recv() {
+                Ok(result) => Some(result),
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                    Some(Err(anyhow!("屏幕加载已取消")))
+                }
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => None,
+            });
+        if let Some(result) = ready {
+            let pending = self.pending.take().expect("pending screen");
+            match result {
+                Ok(session) => self.finish_screen(pending.id, session),
+                Err(error) => {
+                    self.failed_screen = Some(
+                        self.catalog
+                            .iter()
+                            .find(|s| s.id == pending.id)
+                            .map_or((pending.id, -1, -1), |s| {
+                                (s.id, s.video_track_index, s.display.screen_type)
+                            }),
+                    );
+                    self.tabs.error = Some(format!("{error:#}"));
+                }
+            }
+        }
+        if let Some(screen) = self.tabs.command.take()
+            && let Err(error) = self.begin_screen(screen)
+        {
+            self.tabs.error = Some(format!("{error:#}"));
+        }
+        let now = Instant::now();
+        if now >= self.next_refresh {
+            self.refresh_catalog();
+            self.next_refresh = now + Duration::from_millis(250);
+        }
+        self.sync_tabs();
+    }
+
+    fn finish_screen(&mut self, id: i32, session: Arc<NativeViewerSession>) {
+        let Some(factory) = &self.screens else {
+            return;
+        };
+        let current = factory.screens().iter().any(|s| {
+            s.id == id
+                && s.video_track_index == session.track_index
+                && session.screen_binding()
+                    == (s.id as u32 as u64 | ((s.display.screen_type as u32 as u64) << 32))
+        });
+        if !current {
+            // The mapping moved while the screen opened; the refresh retries.
+            self.next_refresh = Instant::now();
+            return;
+        }
+        if !Arc::ptr_eq(&session, &self.session) {
+            match FrameWakeBridge::install(&session, self.proxy.clone(), self.window_id) {
+                // The old bridge releases the previous screen's registration.
+                Ok(wake) => self.wake = wake,
+                Err(error) => {
+                    self.tabs.error = Some(format!("{error:#}"));
+                    return;
+                }
+            }
+            self.session = Arc::clone(&session);
+        }
+        self.annotation.finish();
+        self.annotation.bind(session.stream_control.clone());
+        self.current = None;
+        self.video_size = None;
+        self.video_rect = None;
+        self.cursor = None;
+        self.video_reset = true;
+        self.selected = Some(id);
+        self.failed_screen = None;
+        factory.focus(id);
+        tracing::debug!(screen_id = id, "screen switch bound");
+    }
+
+    fn begin_screen(&mut self, screen_id: i32) -> Result<()> {
+        let factory = self.screens.clone().context("当前连接不支持切换显示器")?;
+        self.catalog
+            .iter()
+            .find(|screen| screen.id == screen_id)
+            .context("显示器已断开")?;
+        self.failed_screen = None;
+        if self.selected == Some(screen_id) {
+            self.pending.take();
+            return Ok(());
+        }
+        if self.pending.as_ref().is_some_and(|p| p.id == screen_id) {
+            return Ok(());
+        }
+        let cancelled = self.pending.take().map(|pending| pending.id);
+        self.session
+            .stream_control
+            .cancel_display_change(self.session.screen_id());
+        self.release_keys();
+        let proxy = self.proxy.clone();
+        let window = self.window_id;
+        let (task, result) = factory.open(
+            screen_id,
+            ViewerDisplayHandle::default(),
+            self.selected,
+            cancelled,
+            move || {
+                let _ = proxy.send_event(UiEvent::Repaint(UiRepaintEvent {
+                    window,
+                    generation: 0,
+                    pass: 0,
+                    when: Instant::now(),
+                }));
+            },
+        );
+        self.pending = Some(PendingScreen {
+            id: screen_id,
+            task,
+            result,
+        });
+        Ok(())
+    }
+
+    /// Follow screens appearing, disappearing or being remapped remotely.
+    fn refresh_catalog(&mut self) {
+        let Some(factory) = &self.screens else {
+            return;
+        };
+        let topology = factory.topology();
+        if topology.sequence != self.topology_sequence {
+            self.topology_sequence = topology.sequence;
+            self.topology_focused = None;
+        }
+        let actual = factory.screens();
+        self.catalog = actual.clone();
+        for screen in &topology.transient_screens {
+            if !self.catalog.iter().any(|s| s.id == screen.id) {
+                self.catalog.push(screen.clone());
+            }
+        }
+        if self.catalog.is_empty() {
+            return;
+        }
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|p| !actual.iter().any(|s| s.id == p.id))
+        {
+            self.pending.take();
+        }
+        // A screen the remote just created or selected comes to the front.
+        if self.topology_focused != topology.selected_screen
+            && topology.reported
+            && !matches!(
+                topology.action,
+                Some(crate::features::stream_control::DisplayTopologyAction::Remove { .. })
+            )
+            && let Some(target) = topology
+                .selected_screen
+                .filter(|id| actual.iter().any(|s| s.id == *id))
+        {
+            self.topology_focused = Some(target);
+            if self.selected != Some(target)
+                && let Err(error) = self.begin_screen(target)
+            {
+                self.tabs.error = Some(format!("{error:#}"));
+            }
+            return;
+        }
+        if self.pending.is_some() {
+            return;
+        }
+        let selected = self
+            .selected
+            .and_then(|id| actual.iter().find(|s| s.id == id));
+        let bound = selected.is_some_and(|screen| {
+            self.session.track_index == screen.video_track_index
+                && self.session.screen_binding()
+                    == (screen.id as u32 as u64 | ((screen.display.screen_type as u32 as u64) << 32))
+        });
+        if bound {
+            return;
+        }
+        // The shown screen went away or moved to another track.
+        let target = selected
+            .map(|screen| screen.id)
+            .or_else(|| actual.first().map(|screen| screen.id));
+        let Some(target) = target else {
+            return;
+        };
+        if actual.iter().any(|s| {
+            s.id == target
+                && self.failed_screen == Some((s.id, s.video_track_index, s.display.screen_type))
+        }) {
+            return;
+        }
+        self.selected = None;
+        if let Err(error) = self.begin_screen(target) {
+            self.failed_screen = actual
+                .iter()
+                .find(|s| s.id == target)
+                .map(|s| (s.id, s.video_track_index, s.display.screen_type));
+            self.tabs.error = Some(error.to_string());
+        }
+    }
+
+    fn sync_tabs(&mut self) {
+        let Some(factory) = &self.screens else {
+            return;
+        };
+        self.tabs.device_switch = factory.device_switch.clone();
+        self.tabs.tabs = self
+            .catalog
+            .iter()
+            .map(|screen| (screen.id, screen.label(&self.catalog)))
+            .collect();
+        self.tabs.selected = self.selected.unwrap_or(-1);
+        self.tabs.pending = self.pending.as_ref().map(|pending| pending.id);
+        let mut visible: Vec<_> = self
+            .selected
+            .into_iter()
+            .chain(self.pending.as_ref().map(|pending| pending.id))
+            .collect();
+        visible.sort_unstable();
+        visible.dedup();
+        factory.set_visible(visible);
+    }
+}
+
+/// Audio-only connections use a small fixed window, as on Windows.
+fn configure_audio_window(window: &Window, compact: bool) {
+    window.set_fullscreen(None);
+    window.set_maximized(false);
+    window.set_resizable(false);
+    window.set_enabled_buttons(
+        winit::window::WindowButtons::CLOSE | winit::window::WindowButtons::MINIMIZE,
+    );
+    let [width, height] = if compact {
+        crate::ui::theme::AUDIO_COMPACT_SIZE
+    } else {
+        crate::ui::theme::AUDIO_WINDOW_SIZE
+    };
+    let size = LogicalSize::new(width, height);
+    window.set_min_inner_size(None::<LogicalSize<f32>>);
+    window.set_max_inner_size(None::<LogicalSize<f32>>);
+    let _ = window.request_inner_size(size);
+    window.set_min_inner_size(Some(size));
+    window.set_max_inner_size(Some(size));
+}
+
+fn restore_video_window_constraints(window: &Window) {
+    window.set_max_inner_size(None::<LogicalSize<f32>>);
+    window.set_resizable(true);
+    window.set_enabled_buttons(winit::window::WindowButtons::all());
+    window.set_min_inner_size(Some(LogicalSize::new(760.0, 520.0)));
 }
 
 /// The decoder drops every decoded frame unless a render thread is registered

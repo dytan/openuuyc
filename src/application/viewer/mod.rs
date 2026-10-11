@@ -44,6 +44,8 @@ pub(crate) mod windows_presenter;
 // The Linux presenter (winit + wgpu) serves the same entry points, so callers
 // keep using the `windows_presenter` path.
 #[cfg(not(windows))]
+mod linux_chrome;
+#[cfg(not(windows))]
 #[path = "linux_presenter.rs"]
 pub(crate) mod windows_presenter;
 
