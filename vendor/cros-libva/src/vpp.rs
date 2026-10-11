@@ -1,6 +1,6 @@
 // Minimal VA-API video post-processing (VPP) helper: scale + colour convert a
 // source surface into a destination surface on the GPU. Added for OpenUUYC's
-// Linux host capture path (BGRX full-res -> NV12 encode size).
+// Linux host capture path (BGRX/BGRA full-res -> NV12 encode size).
 use std::ffi::c_void;
 use std::rc::Rc;
 
@@ -53,36 +53,33 @@ impl VppContext {
         })
     }
 
-    /// Scale + colour-convert `src` into `dst`. Regions cover the whole of each
-    /// surface at the given sizes; the driver picks the conversion matrix from
-    /// the surface fourccs, with BT.601 limited-range luma to match the software
-    /// path. Blocks until the destination surface is ready.
+    /// Scale + colour-convert `src` into `dst`. NULL regions mean "whole
+    /// surface" (required: some iHD builds ignore shallow-copied rect pointers
+    /// from vaCreateBuffer and leave the destination untouched / gray).
+    /// Blocks until the destination surface is ready for encode.
     pub fn blit(
         &self,
         src: bindings::VASurfaceID,
-        src_wh: (u32, u32),
+        _src_wh: (u32, u32),
         dst: bindings::VASurfaceID,
-        dst_wh: (u32, u32),
+        _dst_wh: (u32, u32),
     ) -> Result<(), VaError> {
-        let src_rect = bindings::VARectangle {
-            x: 0,
-            y: 0,
-            width: src_wh.0 as u16,
-            height: src_wh.1 as u16,
-        };
-        let dst_rect = bindings::VARectangle {
-            x: 0,
-            y: 0,
-            width: dst_wh.0 as u16,
-            height: dst_wh.1 as u16,
-        };
-        let mut param: bindings::VAProcPipelineParameterBuffer = Default::default();
+        // Zero-init every field; dangling filter/surface pointers from Default
+        // on some bindgen layouts have been observed to make iHD skip the blit.
+        let mut param: bindings::VAProcPipelineParameterBuffer = unsafe { std::mem::zeroed() };
         param.surface = src;
-        param.surface_region = &src_rect;
-        param.output_region = &dst_rect;
-        // 1 = BT.601 (see VAProcColorStandardType); matches the CPU CSC path.
-        param.surface_color_standard = 1;
-        param.output_color_standard = 1;
+        // NULL = whole surface. Do not point at stack rects: vaCreateBuffer
+        // copies the struct by value but not the pointed-to VARectangle.
+        param.surface_region = std::ptr::null();
+        param.output_region = std::ptr::null();
+        // NV12→NV12 scale path (RGB→NV12 VPP left gray on iHD; we CSC on CPU
+        // and only ask VPP to scale). Both ends are BT.601 limited-range.
+        param.surface_color_standard =
+            bindings::_VAProcColorStandardType_VAProcColorStandardBT601;
+        param.output_color_standard =
+            bindings::_VAProcColorStandardType_VAProcColorStandardBT601;
+        param.input_color_properties.color_range = bindings::VA_SOURCE_RANGE_REDUCED as u8;
+        param.output_color_properties.color_range = bindings::VA_SOURCE_RANGE_REDUCED as u8;
         param.filter_flags = bindings::VA_FILTER_SCALING_HQ;
 
         let mut buf_id: bindings::VABufferID = 0;
@@ -97,6 +94,9 @@ impl VppContext {
                 &mut buf_id,
             )
         })?;
+
+        // Source must be idle before VPP reads it (after CPU PutImage/derive).
+        va_check(unsafe { bindings::vaSyncSurface(self.display.handle(), src) })?;
 
         let begin = va_check(unsafe {
             bindings::vaBeginPicture(self.display.handle(), self.context_id, dst)

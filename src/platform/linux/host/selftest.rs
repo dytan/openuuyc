@@ -152,7 +152,7 @@ pub fn run(bench: Option<u32>) -> Result<String> {
             }
             let enc_started = Instant::now();
             // Periodic IDR so we measure realistic steady-state P-frames too.
-            let force = i % 60 == 0;
+            let force = captured_frames == 0 || i % 60 == 0;
             let packets = bench_encoder
                 .encode(&f.texture, (i as i64) * 10_000, force)
                 .context("基准编码失败")?;
@@ -221,7 +221,7 @@ pub fn run(bench: Option<u32>) -> Result<String> {
                         continue;
                     }
                     let enc_started = Instant::now();
-                    let force = i % 60 == 0;
+                    let force = va_frames == 0 || i % 60 == 0;
                     let packets = va
                         .encode_cancellable(
                             &f.texture,
@@ -306,7 +306,11 @@ pub fn run(bench: Option<u32>) -> Result<String> {
                             continue;
                         };
                         let enc_started = Instant::now();
-                        let force = i % 60 == 0;
+                        // Force IDR on the first *successful* VPP frame: the
+                        // shared VA encoder may already have refs from the
+                        // preceding non-VPP bench, and skipped captures make
+                        // `i % 60 == 0` miss the real first frame.
+                        let force = vp_frames == 0 || i % 60 == 0;
                         let packets = match va.encode_scaled(
                             &bgra,
                             sw_w,

@@ -173,12 +173,20 @@ impl Encoder {
             .find(|f| f.fourcc == FOURCC_NV12)
             .context("VA-API 驱动未提供 NV12 图像格式")?;
 
-        // Optional GPU scale+CSC path: a BGRX image format and a VPP context.
-        // Failure here just disables the VPP path; the CPU upload still works.
-        let bgra_fmt = display
-            .query_image_formats()
-            .ok()
-            .and_then(|fmts| fmts.into_iter().find(|f| f.fourcc == cros_libva::VA_FOURCC_BGRX));
+        // Optional GPU scale+CSC path. Prefer BGRA (matches capture byte
+        // order); fall back to BGRX. Failure just disables the VPP path.
+        let bgra_fmt = display.query_image_formats().ok().and_then(|fmts| {
+            let mut bgra = None;
+            let mut bgrx = None;
+            for f in fmts {
+                if f.fourcc == cros_libva::VA_FOURCC_BGRA {
+                    bgra = Some(f);
+                } else if f.fourcc == cros_libva::VA_FOURCC_BGRX {
+                    bgrx = Some(f);
+                }
+            }
+            bgra.or(bgrx)
+        });
         let vpp = match cros_libva::VppContext::new(Rc::clone(&display), aligned_w, aligned_h) {
             Ok(v) => Some(v),
             Err(e) => {
@@ -284,9 +292,9 @@ impl Encoder {
         self.finish_encode(surface, curr_surface_id, force)
     }
 
-    /// VA-API VPP path: scale + colour-convert a full-res BGRA frame on the GPU
-    /// into the NV12 encode surface, then encode. `src_pitch` is the source row
-    /// stride in bytes. Caller falls back to the CPU path on Err.
+    /// VA-API VPP path: CPU CSC of full-res BGRA → NV12, then GPU VPP scale
+    /// into the encode surface. `src_pitch` is the source row stride in bytes.
+    /// Caller falls back to the CPU path on Err.
     pub(super) fn encode_scaled(
         &mut self,
         bgra: &[u8],
@@ -307,7 +315,19 @@ impl Encoder {
         );
         self.ensure_src_surface(src_w, src_h)?;
         self.upload_bgra(src_w, src_h, src_pitch, bgra)?;
-        let src_id = self.src_surface.as_ref().context("VPP 源表面缺失")?.id();
+        let src_surface = self.src_surface.as_ref().context("VPP 源表面缺失")?;
+        let src_id = src_surface.id();
+        if self.frame_count == 0 {
+            if let Ok(img) = Image::create_from(src_surface, self.image_fmt, (src_w, src_h), (src_w, src_h)) {
+                let va = *img.image();
+                let y = &img.as_ref()[va.offsets[0] as usize..];
+                let n = (src_w as usize * 4).min(y.len());
+                let sample = &y[..n];
+                let mean = sample.iter().map(|&b| b as u32).sum::<u32>() / sample.len().max(1) as u32;
+                let (min, max) = (sample.iter().copied().min().unwrap_or(0), sample.iter().copied().max().unwrap_or(0));
+                eprintln!("VPP src Y mean={mean} min={min} max={max} {src_w}x{src_h}");
+            }
+        }
 
         let surface = self.surfaces[self.slot]
             .take()
@@ -318,51 +338,99 @@ impl Encoder {
             .unwrap()
             .blit(src_id, (src_w, src_h), curr_surface_id, (self.width, self.height))
             .map_err(|e| anyhow::anyhow!("VA-API VPP 处理失败: {e}"))?;
+        if self.frame_count == 0 {
+            if let Ok(img) = Image::create_from(&surface, self.image_fmt, (self.aligned_w, self.aligned_h), (self.width, self.height)) {
+                let va = *img.image();
+                let y = &img.as_ref()[va.offsets[0] as usize..];
+                let n = (self.width as usize * 4).min(y.len());
+                let sample = &y[..n];
+                let mean = sample.iter().map(|&b| b as u32).sum::<u32>() / sample.len().max(1) as u32;
+                let (min, max) = (sample.iter().copied().min().unwrap_or(0), sample.iter().copied().max().unwrap_or(0));
+                eprintln!("VPP dst Y mean={mean} min={min} max={max}");
+            }
+        }
         self.finish_encode(surface, curr_surface_id, force)
     }
 
     pub(super) fn vpp_available(&self) -> bool {
-        self.vpp.is_some() && self.bgra_fmt.is_some()
+        // GPU scale path: CPU CSC into a full-res NV12 surface, then VPP scale
+        // to the encode surface. RGB→NV12 VPP left the dest mid-gray on iHD.
+        self.vpp.is_some()
     }
 
     fn ensure_src_surface(&mut self, src_w: u32, src_h: u32) -> Result<()> {
         if self.src_dims == (src_w, src_h) && self.src_surface.is_some() {
             return Ok(());
         }
+        ensure!(src_w % 2 == 0 && src_h % 2 == 0, "VPP NV12 源尺寸必须为偶数");
         let surfaces = self
             .display
             .create_surfaces::<()>(
-                cros_libva::VA_RT_FORMAT_RGB32,
-                Some(cros_libva::VA_FOURCC_BGRX),
+                VA_RT_FORMAT_YUV420,
+                Some(FOURCC_NV12),
                 src_w,
                 src_h,
                 Some(UsageHint::USAGE_HINT_VPP_READ),
                 vec![()],
             )
-            .map_err(|e| anyhow::anyhow!("创建 VPP 源表面失败: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("创建 VPP NV12 源表面失败: {e}"))?;
         self.src_surface = surfaces.into_iter().next();
         self.src_dims = (src_w, src_h);
         Ok(())
     }
 
     fn upload_bgra(&mut self, src_w: u32, src_h: u32, src_pitch: usize, bgra: &[u8]) -> Result<()> {
-        let fmt = self.bgra_fmt.context("VPP 缺少 BGRX 图像格式")?;
+        // CPU BT.601 limited CSC into the full-res NV12 VPP source. VPP then
+        // only scales; RGB→NV12 VPP on this iHD left the encode surface gray.
         let surface = self.src_surface.as_ref().context("VPP 源表面缺失")?;
-        let mut image = Image::create_from(surface, fmt, (src_w, src_h), (src_w, src_h))
-            .map_err(|e| anyhow::anyhow!("创建 VPP 上传图像失败: {e}"))?;
+        let mut image = Image::create_from(
+            surface,
+            self.image_fmt,
+            (src_w, src_h),
+            (src_w, src_h),
+        )
+        .map_err(|e| anyhow::anyhow!("创建 VPP NV12 上传图像失败: {e}"))?;
         let va = *image.image();
-        let off = va.offsets[0] as usize;
-        let dpitch = va.pitches[0] as usize;
-        let row = (src_w as usize) * 4;
+        let off_y = va.offsets[0] as usize;
+        let off_c = va.offsets[1] as usize;
+        let pit_y = va.pitches[0] as usize;
+        let pit_c = va.pitches[1] as usize;
+        let (w, h) = (src_w as usize, src_h as usize);
         let dst = image.as_mut();
-        for y in 0..src_h as usize {
-            let d = off + y * dpitch;
-            let srow = y * src_pitch;
-            dst[d..d + row].copy_from_slice(&bgra[srow..srow + row]);
+        for by in 0..(h / 2) {
+            let y0 = by * 2;
+            let y1 = y0 + 1;
+            let row0 = &bgra[y0 * src_pitch..y0 * src_pitch + w * 4];
+            let row1 = &bgra[y1 * src_pitch..y1 * src_pitch + w * 4];
+            let yline0 = off_y + y0 * pit_y;
+            let yline1 = off_y + y1 * pit_y;
+            let cline = off_c + by * pit_c;
+            for bx in 0..(w / 2) {
+                let x0 = bx * 2;
+                let p00 = &row0[x0 * 4..x0 * 4 + 8];
+                let p10 = &row1[x0 * 4..x0 * 4 + 8];
+                let (b00, g00, r00) = (p00[0] as i32, p00[1] as i32, p00[2] as i32);
+                let (b01, g01, r01) = (p00[4] as i32, p00[5] as i32, p00[6] as i32);
+                let (b10, g10, r10) = (p10[0] as i32, p10[1] as i32, p10[2] as i32);
+                let (b11, g11, r11) = (p10[4] as i32, p10[5] as i32, p10[6] as i32);
+                dst[yline0 + x0] = luma(r00, g00, b00);
+                dst[yline0 + x0 + 1] = luma(r01, g01, b01);
+                dst[yline1 + x0] = luma(r10, g10, b10);
+                dst[yline1 + x0 + 1] = luma(r11, g11, b11);
+                let r = (r00 + r01 + r10 + r11) / 4;
+                let g = (g00 + g01 + g10 + g11) / 4;
+                let b = (b00 + b01 + b10 + b11) / 4;
+                dst[cline + bx * 2] = chroma_u(r, g, b);
+                dst[cline + bx * 2 + 1] = chroma_v(r, g, b);
+            }
         }
-        drop(image); // vaPutImage uploads on drop.
+        drop(image);
+        surface
+            .sync()
+            .map_err(|e| anyhow::anyhow!("同步 VPP NV12 源表面失败: {e}"))?;
         Ok(())
     }
+
 
     fn finish_encode(
         &mut self,
