@@ -21,6 +21,8 @@ pub(crate) struct Status {
     pub message: String,
     pub error: Option<String>,
     pub settings_error: Option<String>,
+    #[serde(default)]
+    pub host_capability: Option<String>,
     pub input_backend: Option<String>,
     pub input_error: Option<String>,
     #[serde(default)]
@@ -357,11 +359,16 @@ impl Handle {
         if crate::platform::windows::host_service::resident::managed() {
             return Ok(());
         }
-        // Linux is a controller-only build: there is no host capture/encode
-        // path to warm up. Viewer decode is probed per connection by the
-        // decoder pool (VA-API H.264/HEVC/AV1, then software).
         #[cfg(not(windows))]
-        let _ = cancel;
+        {
+            // Linux hosting is real: warm up the host capture/encode probe and
+            // check input injection so the control panel can report any blocker
+            // (unsupported compositor, missing /dev/uinput permission) up front.
+            // Failures here are informational and never a login-time dialog.
+            let hint = self.linux_host_capability(&cancel).await;
+            let mut state = lock(&self.ownership);
+            state.status.host_capability = hint;
+        }
         #[cfg(windows)]
         {
             tokio::task::spawn_blocking(super::displays::recovery::recover_abandoned).await??;
@@ -382,6 +389,53 @@ impl Handle {
                 .await?;
         }
         Ok(())
+    }
+    /// Linux-only: run the real host media probe and an input self-check, and
+    /// return a short actionable message when a hosting prerequisite is missing.
+    /// `None` means the controlled side is ready to accept a connection.
+    #[cfg(not(windows))]
+    async fn linux_host_capability(
+        &self,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Option<String> {
+        if let Some(reason) = crate::platform::linux::capture::unavailable_reason() {
+            return Some(reason.to_owned());
+        }
+        let screens = match tokio::task::spawn_blocking(capture::screens).await {
+            Ok(Ok(screens)) => screens,
+            Ok(Err(error)) => return Some(format!("读取显示器失败：{error:#}")),
+            Err(_) => return Some("显示器检查任务中断".into()),
+        };
+        let Some(screen) = screens.iter().find(|s| s.primary).or(screens.first()).cloned() else {
+            return Some("未检测到可采集的显示器".into());
+        };
+        let owner = self.clone();
+        let probe_cancel = cancel.clone();
+        if let Err(error) = self
+            .media
+            .prepare(screen, move || {
+                !probe_cancel.is_cancelled() && lock(&owner.ownership).active
+            })
+            .await
+        {
+            return Some(format!("本机画面采集/编码不可用：{error:#}"));
+        }
+        // Input injection: a missing /dev/uinput or lacking permission is the
+        // most common blocker, and is fixed by a udev rule + re-login.
+        match tokio::task::spawn_blocking(|| {
+            if !crate::platform::linux::host::input::present() {
+                Err("/dev/uinput 不存在，请加载 uinput 内核模块".to_owned())
+            } else {
+                crate::platform::linux::host::input::self_test()
+                    .map_err(|e| format!("{e:#}"))
+            }
+        })
+        .await
+        {
+            Ok(Ok(())) => None,
+            Ok(Err(message)) => Some(format!("键鼠注入不可用：{message}")),
+            Err(_) => Some("输入设备检查任务中断".into()),
+        }
     }
     pub(crate) async fn invalidate_media(&self) {
         self.media.invalidate().await;

@@ -168,6 +168,11 @@ impl DeviceCenterApp {
             },
         );
         if let Some(host) = host.as_ref() {
+            // Linux hosting prerequisites (compositor capture, /dev/uinput).
+            // Shown here, actionable, instead of as a login-time dialog.
+            if let Some(hint) = host.status().host_capability {
+                ui.colored_label(theme::AMBER, format!("本机被控：{hint}"));
+            }
             if host.request_audio_devices()
                 && self
                     .worker
