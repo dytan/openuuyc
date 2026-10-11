@@ -3,11 +3,10 @@ use super::ConnectionMediaOptions;
 use anyhow::{Context, Result};
 use std::io::Write;
 fn path() -> Result<std::path::PathBuf> {
-    Ok(std::path::PathBuf::from(
-        std::env::var_os("LOCALAPPDATA").context("LOCALAPPDATA unavailable")?,
-    )
-    .join("OpenUUYC")
-    .join("media-preferences.json"))
+    // LOCALAPPDATA\OpenUUYC on Windows, XDG data dir on Linux.
+    Ok(crate::paths::app_data_dir()
+        .context("本地设置目录不可用")?
+        .join("media-preferences.json"))
 }
 pub fn load() -> Result<ConnectionMediaOptions> {
     load_from(&path()?)

@@ -65,8 +65,9 @@ pub(super) fn root() -> Result<PathBuf> {
 }
 fn portable_root() -> Result<PathBuf> {
     Ok(
-        PathBuf::from(std::env::var_os("LOCALAPPDATA").context("本地显示配置目录不可用")?)
-            .join("OpenUUYC/displays"),
+        crate::paths::app_data_dir()
+            .context("本地显示配置目录不可用")?
+            .join("displays"),
     )
 }
 pub(super) fn transfer_preferences(to_service: bool) -> Result<()> {
