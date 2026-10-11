@@ -53,6 +53,8 @@ pub(super) struct Encoder {
     mb_w: u16,
     mb_h: u16,
     level_idc: u8,
+    profile_idc: u8,
+    cabac: bool,
     rc: Rc_,
     bitrate: u32,
     fps: u32,
@@ -164,6 +166,14 @@ impl Encoder {
             .context("VA-API 驱动未提供 NV12 图像格式")?;
 
         let level_idc = 51; // 5.1: ample headroom up to 4K.
+        // Intel's low-power VDEnc entropy support is CABAC; ConstrainedBaseline
+        // forbids CABAC, so Main/High must declare CABAC in both the PPS and the
+        // picture parameters or the decoder reads the slice as CAVLC and fails.
+        let (profile_idc, cabac) = match profile {
+            x if x == VAProfile::VAProfileH264Main => (77u8, true),
+            x if x == VAProfile::VAProfileH264High => (100u8, true),
+            _ => (66u8, false),
+        };
         let mut surfaces_iter = surfaces.into_iter();
         let s0 = surfaces_iter.next().context("缺少编码表面")?;
         let s1 = surfaces_iter.next().context("缺少编码表面")?;
@@ -182,6 +192,8 @@ impl Encoder {
             mb_w,
             mb_h,
             level_idc,
+            profile_idc,
+            cabac,
             rc,
             bitrate: bitrate.max(300_000),
             fps: fps.clamp(1, 240),
@@ -201,7 +213,7 @@ impl Encoder {
             driver_inserts_headers: None,
         };
         enc.sps = enc.build_sps();
-        enc.pps = build_pps();
+        enc.pps = build_pps(enc.cabac);
         tracing::info!(
             width = size.0,
             height = size.1,
@@ -402,7 +414,7 @@ impl Encoder {
         let pic_fields = H264EncPicFields::new(
             u32::from(is_idr),
             1,
-            0,
+            u32::from(self.cabac), // entropy_coding_mode_flag
             0,
             0,
             0,
@@ -595,8 +607,9 @@ impl Encoder {
     fn build_sps(&self) -> Vec<u8> {
         let mut w = BitWriter::new();
         w.u(8, 0x67); // nal: ref_idc=3, type=7
-        w.u(8, 66); // profile_idc = ConstrainedBaseline (baseline)
-        w.u(8, 0x40); // constraint_set1_flag=1, rest 0
+        w.u(8, u32::from(self.profile_idc)); // profile_idc (Main/High/ConstrainedBaseline)
+        // ConstrainedBaseline sets constraint_set1; Main/High clear all flags.
+        w.u(8, if self.profile_idc == 66 { 0x40 } else { 0x00 });
         w.u(8, u32::from(self.level_idc));
         w.ue(0); // seq_parameter_set_id
         w.ue(1); // log2_max_frame_num_minus4
@@ -622,12 +635,12 @@ impl Encoder {
     }
 }
 
-fn build_pps() -> Vec<u8> {
+fn build_pps(cabac: bool) -> Vec<u8> {
     let mut w = BitWriter::new();
     w.u(8, 0x68); // nal: ref_idc=3, type=8
     w.ue(0); // pic_parameter_set_id
     w.ue(0); // seq_parameter_set_id
-    w.u(1, 0); // entropy_coding_mode_flag (CAVLC)
+    w.u(1, u32::from(cabac)); // entropy_coding_mode_flag (1=CABAC)
     w.u(1, 0); // bottom_field_pic_order_in_frame_present_flag
     w.ue(0); // num_slice_groups_minus1
     w.ue(0); // num_ref_idx_l0_default_active_minus1
@@ -789,10 +802,13 @@ fn has_h264_encode(display: &Rc<Display>) -> bool {
 }
 
 fn pick_profile_entrypoint(display: &Rc<Display>) -> Option<(VAProfile::Type, VAEntrypoint::Type)> {
+    // Prefer CABAC-capable profiles: Intel low-power encode emits CABAC, which
+    // ConstrainedBaseline cannot represent. ConstrainedBaseline stays last as a
+    // CAVLC fallback for drivers that only offer it.
     let profiles = [
-        VAProfile::VAProfileH264ConstrainedBaseline,
         VAProfile::VAProfileH264Main,
         VAProfile::VAProfileH264High,
+        VAProfile::VAProfileH264ConstrainedBaseline,
     ];
     let supported = display.query_config_profiles().ok()?;
     // Prefer low-power (EncSliceLP) for latency, else regular EncSlice.
