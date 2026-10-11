@@ -165,6 +165,28 @@ pub(super) fn supported(id: u32, name: &str, files: bool) -> bool {
         1 | 4 | 5 | 6 | 7 | 8 | 10 | 11 | 12 | 13 | 14 | 16 | 17 | 0x81 | 0x8e
     ) || (id >= 0xc000 && !name.is_empty())
 }
+/// Windows-registered / MIME names a peer may use for image payloads instead of
+/// (or in addition to) CF_DIB. Map them onto local CF_DIB so the Linux host can
+/// decode them the same way as a native DIB offer.
+fn image_format_name(name: &str) -> bool {
+    matches!(
+        name,
+        "PNG"
+            | "JFIF"
+            | "image/png"
+            | "image/jpeg"
+            | "image/jpg"
+            | "image/bmp"
+            | "image/tiff"
+            | "public.png"
+            | "public.jpeg"
+            | "public.jpeg-image"
+            | "public.tiff"
+            | "CF_DIB"
+            | "CF_DIBV5"
+    )
+}
+
 pub(super) fn incoming(f: ClipboardFormat, platform: i32, files: bool) -> Option<Format> {
     let local = if platform == 4 {
         match f.name.as_str() {
@@ -177,10 +199,18 @@ pub(super) fn incoming(f: ClipboardFormat, platform: i32, files: bool) -> Option
         }
     } else if f.name.is_empty() {
         f.id
+    } else if image_format_name(&f.name) {
+        // Mac speaking the Windows dialect often advertises "PNG" / "JFIF"
+        // registered formats (and sometimes MIME names) rather than CF_DIB.
+        if f.name.eq_ignore_ascii_case("CF_DIBV5") || f.id == 17 {
+            17
+        } else {
+            8
+        }
     } else {
         register(&f.name)
     };
-    if local == 0 || (!supported(local, &name(local), files) && platform != 4) {
+    if local == 0 || (!supported(local, &name(local), files) && platform != 4 && !image_format_name(&f.name)) {
         return None;
     }
     Some(Format { wire: f, local })
@@ -249,8 +279,108 @@ fn field(bytes: &[u8], key: &str) -> Option<usize> {
 fn windows_lines(s: &str) -> String {
     s.replace("\r\n", "\n").replace('\n', "\r\n")
 }
+fn encoded_image_to_dib(data: Vec<u8>, kind: image::ImageFormat) -> Result<Vec<u8>> {
+    let mut reader = image::ImageReader::with_format(Cursor::new(data), kind);
+    let mut limits = image::Limits::default();
+    limits.max_alloc = Some(MAX_DATA as u64);
+    limits.max_image_width = Some(32768);
+    limits.max_image_height = Some(32768);
+    reader.limits(limits);
+    let decoded = reader.decode()?;
+    let rgba = decoded.to_rgba8();
+    let (w, h) = rgba.dimensions();
+    // Build a 32-bit bottom-up BI_RGB DIB (no file header) matching CF_DIB.
+    let pixels = (w as usize).saturating_mul(h as usize);
+    ensure!(pixels.saturating_mul(4) <= MAX_DATA, "图片过大");
+    let mut dib = Vec::with_capacity(40 + pixels * 4);
+    dib.extend_from_slice(&40u32.to_le_bytes());
+    dib.extend_from_slice(&(w as i32).to_le_bytes());
+    dib.extend_from_slice(&(h as i32).to_le_bytes());
+    dib.extend_from_slice(&1u16.to_le_bytes());
+    dib.extend_from_slice(&32u16.to_le_bytes());
+    dib.extend_from_slice(&0u32.to_le_bytes());
+    dib.extend_from_slice(&((pixels * 4) as u32).to_le_bytes());
+    dib.extend_from_slice(&0i32.to_le_bytes());
+    dib.extend_from_slice(&0i32.to_le_bytes());
+    dib.extend_from_slice(&0u32.to_le_bytes());
+    dib.extend_from_slice(&0u32.to_le_bytes());
+    for row in (0..h as usize).rev() {
+        for column in 0..w as usize {
+            let pixel = &rgba.as_raw()[(row * w as usize + column) * 4..][..4];
+            dib.extend_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
+        }
+    }
+    Ok(dib)
+}
+
+fn sniff_image_format(data: &[u8], name: &str) -> Option<image::ImageFormat> {
+    if data.starts_with(&[0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n'])
+        || name.eq_ignore_ascii_case("PNG")
+        || name.eq_ignore_ascii_case("image/png")
+        || name == "public.png"
+    {
+        return Some(image::ImageFormat::Png);
+    }
+    if data.starts_with(&[0xff, 0xd8, 0xff])
+        || name.eq_ignore_ascii_case("JFIF")
+        || name.eq_ignore_ascii_case("image/jpeg")
+        || name.eq_ignore_ascii_case("image/jpg")
+        || name == "public.jpeg"
+        || name == "public.jpeg-image"
+    {
+        return Some(image::ImageFormat::Jpeg);
+    }
+    if (data.starts_with(b"BM") && data.len() > 14)
+        || name.eq_ignore_ascii_case("image/bmp")
+    {
+        return Some(image::ImageFormat::Bmp);
+    }
+    if name.eq_ignore_ascii_case("image/tiff") || name == "public.tiff" {
+        return Some(image::ImageFormat::Tiff);
+    }
+    None
+}
+
 pub(super) fn convert(data: Vec<u8>, f: &Format, platform: i32, outbound: bool) -> Result<Vec<u8>> {
+    // Windows-dialect peers (incl. macOS controllers talking to our Windows-
+    // spoofed Linux host) may ship PNG/JFIF payloads under a registered name.
+    // Decode those to CF_DIB on the way in; encode DIB→PNG/JPEG on the way out
+    // when we advertised a registered image name alongside CF_DIB.
     if platform != 4 {
+        if let Some(kind) = sniff_image_format(&data, &f.wire.name) {
+            if outbound {
+                // Local image cache is always a packed CF_DIB.
+                if matches!(
+                    kind,
+                    image::ImageFormat::Png | image::ImageFormat::Jpeg | image::ImageFormat::Tiff
+                ) {
+                    let bmp = dib_to_bmp(&data)?;
+                    let mut reader =
+                        image::ImageReader::with_format(Cursor::new(bmp), image::ImageFormat::Bmp);
+                    let mut limits = image::Limits::default();
+                    limits.max_alloc = Some(MAX_DATA as u64);
+                    limits.max_image_width = Some(32768);
+                    limits.max_image_height = Some(32768);
+                    reader.limits(limits);
+                    let image = reader.decode()?;
+                    let mut out = Cursor::new(Vec::new());
+                    image.write_to(&mut out, kind)?;
+                    let encoded = out.into_inner();
+                    ensure!(encoded.len() <= MAX_DATA, "转换后的剪贴板内容过大");
+                    return Ok(encoded);
+                }
+                return Ok(data);
+            }
+            // Inbound: BM-prefixed is a BMP file; strip to DIB. Raw CF_DIB
+            // (header size 40..124) is left alone. Encoded PNG/JPEG → DIB.
+            if kind == image::ImageFormat::Bmp && data.starts_with(b"BM") && data.len() >= 14 {
+                return Ok(data[14..].to_vec());
+            }
+            if kind == image::ImageFormat::Bmp {
+                return Ok(data);
+            }
+            return encoded_image_to_dib(data, kind);
+        }
         return Ok(data);
     }
     let out = match f.wire.name.as_str() {
@@ -416,5 +546,37 @@ mod tests {
         let names: Vec<_> = out.iter().map(|f| f.wire.name.as_str()).collect();
         assert!(names.contains(&"public.utf8-plain-text"));
         assert!(names.contains(&"public.utf16-plain-text"));
+    }
+
+    #[test]
+    fn windows_dialect_png_name_maps_to_dib() {
+        let format = incoming(
+            ClipboardFormat {
+                id: 0,
+                name: "PNG".into(),
+            },
+            1,
+            false,
+        )
+        .expect("PNG should map");
+        assert_eq!(format.local, 8);
+    }
+
+    #[test]
+    fn windows_dialect_png_bytes_convert_to_dib() {
+        // 1x1 red PNG
+        let png: &[u8] = &[0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53, 0xde, 0x00, 0x00, 0x00, 0x0c, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0xf8, 0xcf, 0xc0, 0x00, 0x00, 0x03, 0x01, 0x01, 0x00, 0xc9, 0xfe, 0x92, 0xef, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82];
+        let format = Format {
+            wire: ClipboardFormat {
+                id: 0,
+                name: "PNG".into(),
+            },
+            local: 8,
+        };
+        let dib = convert(png.to_vec(), &format, 1, false).unwrap();
+        assert!(dib.len() >= 40);
+        assert_eq!(u32::from_le_bytes(dib[0..4].try_into().unwrap()), 40);
+        assert_eq!(i32::from_le_bytes(dib[4..8].try_into().unwrap()), 1);
+        assert_eq!(i32::from_le_bytes(dib[8..12].try_into().unwrap()), 1);
     }
 }

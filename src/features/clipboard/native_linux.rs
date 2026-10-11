@@ -174,7 +174,11 @@ impl LocalSnapshot {
             ids.push((1, String::new()));
         }
         if self.image.is_some() {
+            // CF_DIB for Windows peers, plus the widely-supported "PNG"
+            // registered format — macOS controllers often prefer PNG over DIB
+            // when talking to a Windows-dialect host.
             ids.push((8, String::new()));
+            ids.push((formats::register("PNG"), "PNG".into()));
         }
         ids
     }
@@ -195,7 +199,14 @@ impl LocalSnapshot {
                     bytes
                 })
                 .context("本地剪贴板没有文本"),
-            8 => self.image.clone().context("本地剪贴板没有图片"),
+            8 | 17 => self.image.clone().context("本地剪贴板没有图片"),
+            _ if format.wire.name.eq_ignore_ascii_case("PNG")
+                || format.wire.name.eq_ignore_ascii_case("JFIF")
+                || format.wire.name.eq_ignore_ascii_case("image/png")
+                || format.wire.name.eq_ignore_ascii_case("image/jpeg") =>
+            {
+                self.image.clone().context("本地剪贴板没有图片")
+            },
             _ => bail!("不支持的本地剪贴板格式"),
         }
     }
@@ -548,9 +559,11 @@ fn process(state: &mut State, command: Command) {
         Command::Offer(weak, epoch, formats, action) => {
             if let Some(session) = weak.upgrade().filter(|session| session.valid(epoch)) {
                 let names: Vec<_> = formats.iter().map(|f| f.name.as_str()).collect();
+                let ids: Vec<_> = formats.iter().map(|f| f.id).collect();
                 tracing::info!(
                     id = session.id,
                     formats = ?names,
+                    format_ids = ?ids,
                     has_action = action.is_some(),
                     "收到远端剪贴板 FormatList"
                 );
@@ -770,7 +783,10 @@ fn accept_offer_standalone(
             }),
         );
     }
-    let Some(format) = [13u32, 1, 8, 17]
+    // Prefer image over text: a Mac screenshot offer often includes both
+    // CF_UNICODETEXT / HTML Format and PNG/CF_DIB; picking text first made
+    // every image paste look like an empty-or-HTML text clipboard.
+    let Some(format) = [8u32, 17, 13, 1]
         .into_iter()
         .find_map(|id| links.iter().find(|format| format.local == id))
         .cloned()
@@ -897,7 +913,8 @@ fn accept_offer(
     if files && links.iter().any(|link| link.local == descriptor_format()) {
         return accept_files(state, session, epoch);
     }
-    let Some(format) = [13u32, 1, 8, 17]
+    // Prefer image over text (see accept_offer_standalone).
+    let Some(format) = [8u32, 17, 13, 1]
         .into_iter()
         .find_map(|id| links.iter().find(|format| format.local == id))
         .cloned()
@@ -1071,6 +1088,90 @@ fn trim_uri_path(path: PathBuf) -> PathBuf {
 }
 
 /// Read the local clipboard and, when it changed, announce the new formats.
+
+fn is_image_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|ext| {
+            matches!(
+                ext.to_ascii_lowercase().as_str(),
+                "png" | "jpg" | "jpeg" | "bmp" | "gif" | "tif" | "tiff" | "webp"
+            )
+        })
+}
+
+fn encoded_bytes_to_dib(bytes: &[u8]) -> Result<Vec<u8>> {
+    // Re-use formats::convert sniffing by giving it a name matching the magic.
+    let name = if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+        "PNG"
+    } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        "JFIF"
+    } else if bytes.starts_with(b"BM") {
+        "image/bmp"
+    } else {
+        "PNG"
+    };
+    let format = Format {
+        wire: ClipboardFormat {
+            id: 8,
+            name: name.into(),
+        },
+        local: 8,
+    };
+    formats::convert(bytes.to_vec(), &format, 1, false)
+}
+
+fn wl_paste_image() -> Option<Vec<u8>> {
+    for mime in ["image/png", "image/jpeg", "image/bmp", "image/tiff"] {
+        let output = std::process::Command::new("wl-paste")
+            .args(["--type", mime, "-n"])
+            .output()
+            .ok()?;
+        if output.status.success() && !output.stdout.is_empty() {
+            match encoded_bytes_to_dib(&output.stdout) {
+                Ok(dib) => return Some(dib),
+                Err(error) => {
+                    tracing::debug!(mime, error = format!("{error:#}"), "wl-paste 图片解码失败")
+                }
+            }
+        }
+    }
+    None
+}
+
+fn read_local_image(clipboard: &mut arboard::Clipboard, sources: &[PathBuf]) -> Option<Vec<u8>> {
+    if let Ok(image) = clipboard.get_image() {
+        match rgba_to_dib(image.width as u32, image.height as u32, &image.bytes) {
+            Ok(dib) => return Some(dib),
+            Err(error) => tracing::debug!(error = format!("{error:#}"), "本地 RGBA→DIB 失败"),
+        }
+    }
+    if let Some(dib) = wl_paste_image() {
+        return Some(dib);
+    }
+    if sources.len() == 1 && is_image_path(&sources[0]) {
+        match std::fs::read(&sources[0]) {
+            Ok(bytes) if !bytes.is_empty() && bytes.len() <= MAX_CLIP => {
+                match encoded_bytes_to_dib(&bytes) {
+                    Ok(dib) => return Some(dib),
+                    Err(error) => tracing::debug!(
+                        path = %sources[0].display(),
+                        error = format!("{error:#}"),
+                        "本地图片文件解码失败"
+                    ),
+                }
+            }
+            Ok(_) => {}
+            Err(error) => tracing::debug!(
+                path = %sources[0].display(),
+                %error,
+                "读取本地图片文件失败"
+            ),
+        }
+    }
+    None
+}
+
 fn poll_local(state: &mut State) -> Result<()> {
     if state.writing || state.sessions.is_empty() {
         return Ok(());
@@ -1108,7 +1209,17 @@ fn poll_local(state: &mut State) -> Result<()> {
                 .is_some_and(|m| path.starts_with(m.root()))
         })
         .collect::<Vec<_>>();
-    let snapshot = if !sources.is_empty() {
+    // Prefer a bitmap payload when present. File managers put a single image
+    // path on text/uri-list (no image/* offer); promote that to CF_DIB so a
+    // Mac paste into Preview/Pages gets pixels rather than a broken file offer.
+    // Screenshot tools usually offer image/png directly.
+    let image = read_local_image(clipboard, &sources);
+    let snapshot = if let Some(dib) = image {
+        LocalSnapshot {
+            image: Some(dib),
+            ..Default::default()
+        }
+    } else if !sources.is_empty() {
         LocalSnapshot {
             sources,
             ..Default::default()
@@ -1119,17 +1230,7 @@ fn poll_local(state: &mut State) -> Result<()> {
             ..Default::default()
         }
     } else {
-        match clipboard.get_image() {
-            Ok(image) => LocalSnapshot {
-                image: Some(rgba_to_dib(
-                    image.width as u32,
-                    image.height as u32,
-                    &image.bytes,
-                )?),
-                ..Default::default()
-            },
-            Err(_) => LocalSnapshot::default(),
-        }
+        LocalSnapshot::default()
     };
     if snapshot.text == state.local.text
         && snapshot.image == state.local.image
@@ -1209,22 +1310,44 @@ fn serve(
             })();
             match result {
                 Ok(data) if !data.is_empty() => {
+                    tracing::info!(
+                        id = session.id,
+                        format = %ask.format_name,
+                        format_id = ask.format_id,
+                        bytes = data.len(),
+                        "已回传剪贴板格式数据"
+                    );
                     session.enqueue(Outbound::Blocks(epoch, id, ask.block_key, data))
                 }
-                _ => session.emit(
-                    epoch,
-                    response(
-                        id,
-                        ClipboardResponseKind::FormatDataConfirm(ClipboardFormatDataConfirm {
-                            err: 2,
-                            block_key: ask.block_key,
-                            block_count: 0,
-                        }),
-                    ),
-                ),
+                other => {
+                    tracing::warn!(
+                        id = session.id,
+                        format = %ask.format_name,
+                        format_id = ask.format_id,
+                        ok_empty = matches!(other, Ok(_)),
+                        "剪贴板格式数据准备失败或为空"
+                    );
+                    session.emit(
+                        epoch,
+                        response(
+                            id,
+                            ClipboardResponseKind::FormatDataConfirm(ClipboardFormatDataConfirm {
+                                err: 2,
+                                block_key: ask.block_key,
+                                block_count: 0,
+                            }),
+                        ),
+                    )
+                }
             }
         }
         ClipboardRequestKind::FileDescListRequest(ask) => {
+            tracing::info!(
+                id = session.id,
+                task = ask.task_id,
+                sources = state.local.sources.len(),
+                "远端请求文件描述列表"
+            );
             let result = (|| -> Result<Arc<LocalFiles>> {
                 ensure!(session.file_allowed(), "文件剪贴板已关闭");
                 if let Some((files, ticket)) = state.explicit.remove(&session.id) {
@@ -1244,6 +1367,11 @@ fn serve(
                 Ok(Arc::new(collect_files(&state.local.sources)?))
             })();
             let Ok(files) = result else {
+                tracing::warn!(
+                    id = session.id,
+                    task = ask.task_id,
+                    "文件描述列表准备失败，已拒绝远端请求"
+                );
                 return session.emit(
                     epoch,
                     response(
@@ -1258,6 +1386,12 @@ fn serve(
                     ),
                 );
             };
+            tracing::info!(
+                id = session.id,
+                task = ask.task_id,
+                items = files.items.len(),
+                "已回传文件描述列表"
+            );
             state.tasks.insert((session.id, ask.task_id), files.clone());
             // Stay below the SDK's 512 KiB message ceiling even with long names.
             let mut segments = Vec::<Vec<ClipboardFileDescriptor>>::new();
@@ -1307,9 +1441,19 @@ fn serve(
                 Err(anyhow!("文件剪贴板已关闭"))
             };
             let (err, data) = match result {
-                Ok(data) => (1, data),
+                Ok(data) => {
+                    tracing::info!(
+                        id = session.id,
+                        task = ask.task_id,
+                        index = ask.list_index,
+                        offset = ask.pos_offset,
+                        bytes = data.len(),
+                        "已回传文件内容块"
+                    );
+                    (1, data)
+                }
                 Err(error) => {
-                    tracing::debug!(%error, index = ask.list_index, "读取本地文件失败");
+                    tracing::warn!(%error, index = ask.list_index, "读取本地文件失败");
                     (2, Vec::new())
                 }
             };
