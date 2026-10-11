@@ -38,6 +38,8 @@ enum Rc_ {
     Cqp,
 }
 
+static VPP_NV12_DUMPED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 pub(super) struct Encoder {
     display: Rc<Display>,
     context: Rc<Context>,
@@ -289,12 +291,29 @@ impl Encoder {
             .context("VA-API 编码表面缺失")?;
         let curr_surface_id = surface.id();
         self.upload_nv12(&surface, bgra, pitch)?;
+        if std::env::var_os("OPENUUYC_CPU_DUMP_NV12").is_some()
+            && !VPP_NV12_DUMPED.swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            if let Ok(img) = Image::create_from(&surface, self.image_fmt, (self.aligned_w, self.aligned_h), (self.width, self.height)) {
+                let va = *img.image();
+                let buf = img.as_ref();
+                let (w, h) = (self.width as usize, self.height as usize);
+                let (py, pc, oy, oc) = (va.pitches[0] as usize, va.pitches[1] as usize, va.offsets[0] as usize, va.offsets[1] as usize);
+                let mut out = Vec::with_capacity(w*h*3/2);
+                for y in 0..h { out.extend_from_slice(&buf[oy+y*py..oy+y*py+w]); }
+                for y in 0..h/2 { out.extend_from_slice(&buf[oc+y*pc..oc+y*pc+w]); }
+                let _ = std::fs::write("/tmp/cpu_dst.nv12", &out);
+                eprintln!("CPU dst dumped {w}x{h} nv12 pitchY={py}");
+            }
+        }
         self.finish_encode(surface, curr_surface_id, force)
     }
 
-    /// VA-API VPP path: CPU CSC of full-res BGRA → NV12, then GPU VPP scale
-    /// into the encode surface. `src_pitch` is the source row stride in bytes.
-    /// Caller falls back to the CPU path on Err.
+    /// VA-API VPP path: upload full-res BGRA into an RGB surface, then let the
+    /// GPU colour-convert + scale it into the NV12 encode surface. Only a CPU
+    /// memcpy of the source frame happens on the CPU; CSC and scaling run on the
+    /// iGPU. `src_pitch` is the source row stride in bytes. Caller falls back to
+    /// the CPU path on Err.
     pub(super) fn encode_scaled(
         &mut self,
         bgra: &[u8],
@@ -317,17 +336,6 @@ impl Encoder {
         self.upload_bgra(src_w, src_h, src_pitch, bgra)?;
         let src_surface = self.src_surface.as_ref().context("VPP 源表面缺失")?;
         let src_id = src_surface.id();
-        if self.frame_count == 0 {
-            if let Ok(img) = Image::create_from(src_surface, self.image_fmt, (src_w, src_h), (src_w, src_h)) {
-                let va = *img.image();
-                let y = &img.as_ref()[va.offsets[0] as usize..];
-                let n = (src_w as usize * 4).min(y.len());
-                let sample = &y[..n];
-                let mean = sample.iter().map(|&b| b as u32).sum::<u32>() / sample.len().max(1) as u32;
-                let (min, max) = (sample.iter().copied().min().unwrap_or(0), sample.iter().copied().max().unwrap_or(0));
-                eprintln!("VPP src Y mean={mean} min={min} max={max} {src_w}x{src_h}");
-            }
-        }
 
         let surface = self.surfaces[self.slot]
             .take()
@@ -338,14 +346,47 @@ impl Encoder {
             .unwrap()
             .blit(src_id, (src_w, src_h), curr_surface_id, (self.width, self.height))
             .map_err(|e| anyhow::anyhow!("VA-API VPP 处理失败: {e}"))?;
-        if self.frame_count == 0 {
-            if let Ok(img) = Image::create_from(&surface, self.image_fmt, (self.aligned_w, self.aligned_h), (self.width, self.height)) {
+        if std::env::var_os("OPENUUYC_VPP_DUMP_NV12").is_some()
+            && !VPP_NV12_DUMPED.swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            match Image::create_from(
+                &surface,
+                self.image_fmt,
+                (self.aligned_w, self.aligned_h),
+                (self.width, self.height),
+            ) {
+                Ok(img) => {
+                    let va = *img.image();
+                    let buf = img.as_ref();
+                    let (w, h) = (self.width as usize, self.height as usize);
+                    let py = va.pitches[0] as usize;
+                    let pc = va.pitches[1] as usize;
+                    let oy = va.offsets[0] as usize;
+                    let oc = va.offsets[1] as usize;
+                    let mut out = Vec::with_capacity(w * h * 3 / 2);
+                    for y in 0..h { out.extend_from_slice(&buf[oy + y * py..oy + y * py + w]); }
+                    for y in 0..h / 2 { out.extend_from_slice(&buf[oc + y * pc..oc + y * pc + w]); }
+                    let _ = std::fs::write("/tmp/vpp_dst.nv12", &out);
+                    eprintln!("VPP dst dumped {w}x{h} nv12 pitchY={py} ({} bytes)", out.len());
+                }
+                Err(e) => eprintln!("VPP dst dump create_from 失败: {e}"),
+            }
+        }
+        if std::env::var_os("OPENUUYC_VPP_SAMPLE").is_some() && self.frame_count == 0 {
+            if let Ok(img) = Image::create_from(
+                &surface,
+                self.image_fmt,
+                (self.aligned_w, self.aligned_h),
+                (self.width, self.height),
+            ) {
                 let va = *img.image();
                 let y = &img.as_ref()[va.offsets[0] as usize..];
                 let n = (self.width as usize * 4).min(y.len());
                 let sample = &y[..n];
-                let mean = sample.iter().map(|&b| b as u32).sum::<u32>() / sample.len().max(1) as u32;
-                let (min, max) = (sample.iter().copied().min().unwrap_or(0), sample.iter().copied().max().unwrap_or(0));
+                let mean = sample.iter().map(|&b| b as u32).sum::<u32>()
+                    / sample.len().max(1) as u32;
+                let min = sample.iter().copied().min().unwrap_or(0);
+                let max = sample.iter().copied().max().unwrap_or(0);
                 eprintln!("VPP dst Y mean={mean} min={min} max={max}");
             }
         }
@@ -353,84 +394,63 @@ impl Encoder {
     }
 
     pub(super) fn vpp_available(&self) -> bool {
-        // GPU scale path: CPU CSC into a full-res NV12 surface, then VPP scale
-        // to the encode surface. RGB→NV12 VPP left the dest mid-gray on iHD.
-        self.vpp.is_some()
+        // GPU scale+CSC path: BGRA upload -> VPP (CSC+scale) -> NV12 encode.
+        self.vpp.is_some() && self.bgra_fmt.is_some()
     }
 
     fn ensure_src_surface(&mut self, src_w: u32, src_h: u32) -> Result<()> {
         if self.src_dims == (src_w, src_h) && self.src_surface.is_some() {
             return Ok(());
         }
-        ensure!(src_w % 2 == 0 && src_h % 2 == 0, "VPP NV12 源尺寸必须为偶数");
+        ensure!(src_w % 2 == 0 && src_h % 2 == 0, "VPP 源尺寸必须为偶数");
+        let fourcc = self
+            .bgra_fmt
+            .as_ref()
+            .map(|f| f.fourcc)
+            .unwrap_or(cros_libva::VA_FOURCC_BGRA);
         let surfaces = self
             .display
             .create_surfaces::<()>(
-                VA_RT_FORMAT_YUV420,
-                Some(FOURCC_NV12),
+                cros_libva::VA_RT_FORMAT_RGB32,
+                Some(fourcc),
                 src_w,
                 src_h,
                 Some(UsageHint::USAGE_HINT_VPP_READ),
                 vec![()],
             )
-            .map_err(|e| anyhow::anyhow!("创建 VPP NV12 源表面失败: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("创建 VPP RGB 源表面失败: {e}"))?;
         self.src_surface = surfaces.into_iter().next();
         self.src_dims = (src_w, src_h);
         Ok(())
     }
 
     fn upload_bgra(&mut self, src_w: u32, src_h: u32, src_pitch: usize, bgra: &[u8]) -> Result<()> {
-        // CPU BT.601 limited CSC into the full-res NV12 VPP source. VPP then
-        // only scales; RGB→NV12 VPP on this iHD left the encode surface gray.
+        let fmt = self.bgra_fmt.context("VPP 缺少 BGRA 图像格式")?;
         let surface = self.src_surface.as_ref().context("VPP 源表面缺失")?;
-        let mut image = Image::create_from(
-            surface,
-            self.image_fmt,
-            (src_w, src_h),
-            (src_w, src_h),
-        )
-        .map_err(|e| anyhow::anyhow!("创建 VPP NV12 上传图像失败: {e}"))?;
+        // Prefer a derived view (direct write into surface memory). Fall back to
+        // create_from + vaPutImage when derive is unavailable for RGB surfaces.
+        let mut image = match Image::derive_from(surface, (src_w, src_h)) {
+            Ok(img) if img.image().format.fourcc == fmt.fourcc => img,
+            Ok(_) | Err(_) => Image::create_from(surface, fmt, (src_w, src_h), (src_w, src_h))
+                .map_err(|e| anyhow::anyhow!("创建 VPP RGB 上传图像失败: {e}"))?,
+        };
         let va = *image.image();
-        let off_y = va.offsets[0] as usize;
-        let off_c = va.offsets[1] as usize;
-        let pit_y = va.pitches[0] as usize;
-        let pit_c = va.pitches[1] as usize;
-        let (w, h) = (src_w as usize, src_h as usize);
+        let off = va.offsets[0] as usize;
+        let dpitch = va.pitches[0] as usize;
+        let row = (src_w as usize) * 4;
+        ensure!(dpitch >= row, "VPP 上传目标 pitch 过小");
         let dst = image.as_mut();
-        for by in 0..(h / 2) {
-            let y0 = by * 2;
-            let y1 = y0 + 1;
-            let row0 = &bgra[y0 * src_pitch..y0 * src_pitch + w * 4];
-            let row1 = &bgra[y1 * src_pitch..y1 * src_pitch + w * 4];
-            let yline0 = off_y + y0 * pit_y;
-            let yline1 = off_y + y1 * pit_y;
-            let cline = off_c + by * pit_c;
-            for bx in 0..(w / 2) {
-                let x0 = bx * 2;
-                let p00 = &row0[x0 * 4..x0 * 4 + 8];
-                let p10 = &row1[x0 * 4..x0 * 4 + 8];
-                let (b00, g00, r00) = (p00[0] as i32, p00[1] as i32, p00[2] as i32);
-                let (b01, g01, r01) = (p00[4] as i32, p00[5] as i32, p00[6] as i32);
-                let (b10, g10, r10) = (p10[0] as i32, p10[1] as i32, p10[2] as i32);
-                let (b11, g11, r11) = (p10[4] as i32, p10[5] as i32, p10[6] as i32);
-                dst[yline0 + x0] = luma(r00, g00, b00);
-                dst[yline0 + x0 + 1] = luma(r01, g01, b01);
-                dst[yline1 + x0] = luma(r10, g10, b10);
-                dst[yline1 + x0 + 1] = luma(r11, g11, b11);
-                let r = (r00 + r01 + r10 + r11) / 4;
-                let g = (g00 + g01 + g10 + g11) / 4;
-                let b = (b00 + b01 + b10 + b11) / 4;
-                dst[cline + bx * 2] = chroma_u(r, g, b);
-                dst[cline + bx * 2 + 1] = chroma_v(r, g, b);
-            }
+        for y in 0..src_h as usize {
+            let d = off + y * dpitch;
+            let srow = y * src_pitch;
+            dst[d..d + row].copy_from_slice(&bgra[srow..srow + row]);
         }
-        drop(image);
+        drop(image); // derived: unmap; non-derived: vaPutImage on drop.
         surface
             .sync()
-            .map_err(|e| anyhow::anyhow!("同步 VPP NV12 源表面失败: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("同步 VPP RGB 源表面失败: {e}"))?;
         Ok(())
     }
-
 
     fn finish_encode(
         &mut self,

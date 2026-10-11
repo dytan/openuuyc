@@ -1570,3 +1570,114 @@ fn rgba_to_dib(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>> {
     }
     Ok(dib)
 }
+
+#[cfg(test)]
+mod file_serve_tests {
+    //! Self-test for the Linux→remote (incl. macOS controller) file-clipboard
+    //! serve path: walk a copied tree into the descriptor list and answer the
+    //! FileContentsRequest size/range reads the peer sends when it pastes.
+    use super::*;
+
+    fn unique_dir(tag: &str) -> PathBuf {
+        let base = std::env::temp_dir().join(format!(
+            "ouuyc_fileserve_{tag}_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+        base
+    }
+
+    fn req(list_index: u32, flags: u32, pos_offset: u64, requested_len: u32) -> ClipboardFileContentsRequest {
+        ClipboardFileContentsRequest {
+            task_id: 0,
+            list_index,
+            flags,
+            pos_offset,
+            requested_len,
+        }
+    }
+
+    #[test]
+    fn serves_single_file_size_and_contents() {
+        let dir = unique_dir("single");
+        let path = dir.join("hello.txt");
+        let body = b"the quick brown fox jumps over the lazy dog";
+        std::fs::write(&path, body).unwrap();
+
+        let files = collect_files(&[path.clone()]).expect("collect");
+        assert_eq!(files.items.len(), 1, "one descriptor");
+        let d = &files.items[0].desc;
+        assert_eq!(d.file_name, "hello.txt");
+        assert_eq!(d.file_size, body.len() as u64);
+        assert_eq!(d.file_attributes & FILE_ATTRIBUTE_DIRECTORY, 0);
+
+        // flags=1 -> little-endian u64 size, as the official client reads it.
+        let size = files.read(&req(0, 1, 0, 8)).expect("size read");
+        assert_eq!(size, (body.len() as u64).to_le_bytes().to_vec());
+
+        // flags=2 -> full contents.
+        let whole = files.read(&req(0, 2, 0, body.len() as u32)).expect("full read");
+        assert_eq!(whole, body);
+
+        // flags=2 -> a mid-file range (what a chunked paste asks for).
+        let tail = files.read(&req(0, 2, 4, 5)).expect("range read");
+        assert_eq!(tail, &body[4..9]);
+
+        // Past EOF yields an empty tail, not an error.
+        let past = files.read(&req(0, 2, body.len() as u64, 16)).expect("eof read");
+        assert!(past.is_empty());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn serves_directory_tree_in_order() {
+        let dir = unique_dir("tree");
+        let root = dir.join("folder");
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::write(root.join("a.txt"), b"aaa").unwrap();
+        std::fs::write(root.join("sub").join("b.bin"), b"bbbb").unwrap();
+
+        let files = collect_files(&[root.clone()]).expect("collect tree");
+        let names: Vec<_> = files.items.iter().map(|f| f.desc.file_name.clone()).collect();
+        // Root dir first, then its sorted children; nested path uses backslash.
+        assert!(names.contains(&"folder".to_string()), "names={names:?}");
+        assert!(names.contains(&"folder\\a.txt".to_string()), "names={names:?}");
+        assert!(names.contains(&"folder\\sub".to_string()), "names={names:?}");
+        assert!(names.contains(&"folder\\sub\\b.bin".to_string()), "names={names:?}");
+
+        // Directory entries carry the directory bit and refuse a contents read.
+        let dir_idx = names.iter().position(|n| n == "folder").unwrap() as u32;
+        assert_ne!(
+            files.items[dir_idx as usize].desc.file_attributes & FILE_ATTRIBUTE_DIRECTORY,
+            0
+        );
+        assert!(files.read(&req(dir_idx, 2, 0, 16)).is_err(), "dir has no contents");
+
+        // A nested file still serves its bytes.
+        let file_idx = names.iter().position(|n| n == "folder\\sub\\b.bin").unwrap() as u32;
+        let bytes = files.read(&req(file_idx, 2, 0, 4)).expect("nested read");
+        assert_eq!(bytes, b"bbbb");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn rejects_bad_index_and_oversize_request() {
+        let dir = unique_dir("bad");
+        let path = dir.join("x.dat");
+        std::fs::write(&path, b"12345").unwrap();
+        let files = collect_files(&[path]).expect("collect");
+
+        assert!(files.read(&req(99, 1, 0, 8)).is_err(), "bad index rejected");
+        assert!(
+            files.read(&req(0, 2, 0, (FILE_BLOCK + 1) as u32)).is_err(),
+            "oversize request rejected"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}
