@@ -212,7 +212,16 @@ async fn binding(
     let _guard = stop.clone().drop_guard();
 
     let clipboard = Clipboard::guarded(Some(Arc::new(agent::desktop_available)));
-    clipboard.platform(platform.account_code().unwrap_or(0));
+    // The host registers with the account as a Windows device (platform 1) so it
+    // is controllable and advertises remote_clipboard_v5. Every controller,
+    // including macOS, therefore speaks the Windows clipboard-format dialect on
+    // the wire (CF ids such as CF_UNICODETEXT=13 with an empty name, "HTML
+    // Format", CF_DIB) rather than Mac UTIs. Translate with the Windows dialect
+    // regardless of the controller's real platform; using the controller's
+    // platform (e.g. 4 = Mac) made incoming formats unrecognised and silently
+    // dropped the paste in both directions.
+    let _ = platform;
+    clipboard.platform(1);
     clipboard.host_role();
 
     let (out_tx, mut out_rx) = mpsc::channel::<Vec<u8>>(32);
