@@ -21,6 +21,8 @@ use tokio_util::sync::CancellationToken;
 
 #[path = "capture_worker/metrics.rs"]
 mod metrics;
+#[path = "capture_worker/feed.rs"]
+mod feed;
 
 pub(super) fn capture_loop(
     mut screen: capture::Screen,
@@ -40,7 +42,10 @@ pub(super) fn capture_loop(
 ) -> Result<()> {
     let _activity = crate::platform::windows::host_service::activity::Work::new();
     let _runtime = encoder::Runtime::new()?;
-    let mut desktop = None;
+    // Capture runs on its own thread (`feed`) so grab+scale overlaps encode.
+    let mut feed: Option<feed::Feed> = None;
+    let mut backend_name: &'static str = "Linux";
+    let mut last_hdr_available = false;
     let mut encoder = None;
     let mut current = None;
     let mut next = Instant::now();
@@ -81,32 +86,36 @@ pub(super) fn capture_loop(
         }
 
         let requested_hdr = wanted.color.is_hdr();
-        if desktop.is_none() && transport.media_ready() && wanted.sending && wanted.capturing {
-            // The authorized track is already negotiated. Prepare its native
-            // capture while ICE/DTLS is still connecting; the gate below still
+        if feed.is_none() && transport.media_ready() && wanted.sending && wanted.capturing {
+            // The authorized track is already negotiated. Start the capture-ahead
+            // thread while ICE/DTLS is still connecting; the gate below still
             // forbids frame acquisition/encoding/sending until transport is up.
             // Nothing is kept warm outside this track's lease/cancellation scope.
             let opened_at = Instant::now();
             let connecting = !connected.load(Ordering::Acquire);
-            desktop = Some(capture::Desktop::open_selected(&screen)?);
-            generation = desktop.as_ref().unwrap().generation;
+            feed = Some(feed::Feed::start(
+                screen.clone(),
+                config.clone(),
+                handle.clone(),
+                cancel.clone(),
+            ));
             tracing::info!(
                 elapsed_ms = opened_at.elapsed().as_millis(),
                 connecting,
-                "host capture preparation completed"
+                "host capture feed started"
             );
             // Native setup may overlap incoming CaptureSetting changes. Read
             // the current revision before configuring or encoding any frame.
             continue;
         }
-        if let Some(desktop) = desktop.as_ref() {
+        if feed.is_some() {
             // T CCDCA0/CF3450 gate HDR on the actual source, not only the
             // requested setting. Keep the request so same-source HDR recovery
             // can re-enable the negotiated format without rewriting user intent.
             negotiated.apply_source(
                 &mut wanted,
                 (screen.width, screen.height),
-                desktop.hdr_available(),
+                last_hdr_available,
             )?;
         }
         let settings = (
@@ -219,7 +228,7 @@ pub(super) fn capture_loop(
                 if last_diagnostics.take().is_some() {
                     handle.video(None);
                 }
-                desktop = None;
+                feed = None;
                 encoder = None;
                 current = None;
                 publication.send_if_modified(|state| {
@@ -251,40 +260,58 @@ pub(super) fn capture_loop(
             std::thread::sleep(Duration::from_millis(2));
             continue;
         }
-        if desktop.is_none() {
-            desktop = Some(capture::Desktop::open_selected(&screen)?);
-            generation = desktop.as_ref().unwrap().generation;
+        let feed_ref = match feed.as_mut() {
+            Some(feed_ref) => feed_ref,
+            None => {
+                feed = Some(feed::Feed::start(
+                    screen.clone(),
+                    config.clone(),
+                    handle.clone(),
+                    cancel.clone(),
+                ));
+                continue;
+            }
+        };
+        if let Some(fatal) = feed_ref.fatal() {
+            anyhow::bail!(fatal);
         }
         let wait_ms = ((1000.0 / f64::from(wanted.fps)).round() as u32).max(1);
-        let capture_started = Instant::now();
         // Advance the planned deadline, not the (usually late) wake-up time.
         // Otherwise sleep/dispatch overhead is added to every frame period.
         // A whole missed period resets the clock instead of replaying a backlog.
-        next = if capture_started.saturating_duration_since(next) >= period {
-            capture_started + period
+        let loop_now = Instant::now();
+        next = if loop_now.saturating_duration_since(next) >= period {
+            loop_now + period
         } else {
             next + period
         };
-        let captured = desktop.as_mut().context("缺少采集源")?.next(
-            wait_ms,
-            wanted.quality,
-            wanted.cursor_capture,
-            wanted.color.is_hdr(),
-            wanted.maximum,
-        );
-        metrics.capture.record(capture_started.elapsed());
-        let captured = captured?;
-        let capture_state = desktop.as_ref().context("缺少采集源")?;
-        *lock(&pointer) = capture_state.cursor.clone();
-        if generation != capture_state.generation {
-            generation = capture_state.generation;
-            encoder = None;
-            cached = None;
-            current = None;
-            last_frame = None;
-            keyframe.store(true, Ordering::Release);
-        }
-        screen = capture_state.screen.clone();
+        // The producer already grabbed the newest frame while we encoded the
+        // previous one, so this normally returns immediately with a fresh frame.
+        let snapshot = feed_ref.wait(wait_ms);
+        let captured = match &snapshot {
+            Some(snap) => {
+                // Record the real grab+scale cost so throughput logs stay honest.
+                metrics.capture.record(snap.grab + snap.scale);
+                *lock(&pointer) = snap.cursor.clone();
+                if generation != snap.generation {
+                    generation = snap.generation;
+                    encoder = None;
+                    cached = None;
+                    current = None;
+                    last_frame = None;
+                    keyframe.store(true, Ordering::Release);
+                }
+                screen = snap.screen.clone();
+                backend_name = snap.backend_name;
+                last_hdr_available = snap.hdr_available;
+                snap.available
+            }
+            None => {
+                // No fresh frame within the period: fall back to the cached one.
+                metrics.backpressure_waits += 1;
+                true
+            }
+        };
         // A selected source remains attached during temporary capture loss.
         // Removing its track here can make the receiver unsubscribe and prevent
         // the next capture attempt. Visibility has its own permission report.
@@ -296,16 +323,16 @@ pub(super) fn capture_loop(
             state.capturing = true;
             changed
         });
-        handle.source(&screen, capture_state.backend_name());
+        handle.source(&screen, backend_name);
         if wanted.color.is_hdr()
-            != (requested_hdr && capture_state.hdr_available() && wanted.format.depth == 10)
+            != (requested_hdr && last_hdr_available && wanted.format.depth == 10)
         {
             // Capture recovery or source refresh changed the effective format.
             // Rebuild preprocessing/encoder before admitting this frame.
             cached = None;
             continue;
         }
-        if !capture_state.available {
+        if !captured {
             cached = None;
             publication.send_if_modified(|state| {
                 if state.visible {
@@ -318,7 +345,7 @@ pub(super) fn capture_loop(
             std::thread::sleep(Duration::from_millis(20));
             continue;
         }
-        let frame = match captured {
+        let frame = match snapshot.and_then(|snap| snap.frame) {
             Some(frame) => {
                 metrics.new_frames += u64::from(frame.is_new);
                 cached = Some(frame.clone());
@@ -381,7 +408,7 @@ pub(super) fn capture_loop(
                         created.implementation(),
                         created.maximum_size(),
                         &screen,
-                        desktop.as_ref().context("缺少采集源")?.backend_name(),
+                        backend_name,
                     );
                     Some(created)
                 }
@@ -529,7 +556,7 @@ pub(super) fn capture_loop(
                 format: wanted.format,
                 budget_size,
                 encoder: Some(candidate.capability.backend),
-                capture: desktop.as_ref().map_or("Linux", |d| d.backend_name()).into(),
+                capture: backend_name.into(),
             };
             publication.send_if_modified(|old| {
                 if *old != state {
