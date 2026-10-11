@@ -7,7 +7,9 @@
 
 pkgname=openuuyc-bin
 _pkgname=openuuyc
-pkgver=0.7.0
+pkgver=1.0.0rc2
+# Upstream version as published (pacman forbids '-' in pkgver).
+_upstreamver=1.0.0-rc.2
 pkgrel=1
 pkgdesc="Native Linux controller for UU Remote (prebuilt binary)"
 arch=('x86_64')
@@ -34,7 +36,7 @@ optdepends=(
 )
 # Prefer an explicitly provided tarball path for local packaging.
 # For release automation, point source at the GitHub release asset.
-source=("${OPENUUYC_TARBALL:-OpenUUYC-linux-x86_64-${pkgver}.tar.gz}")
+source=("${OPENUUYC_TARBALL:-OpenUUYC-linux-x86_64-${_upstreamver}.tar.gz}")
 sha256sums=('SKIP')
 
 package() {

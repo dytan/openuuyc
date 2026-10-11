@@ -18,7 +18,7 @@ rustc --version   # known good: 1.98.1
 
 ```bash
 sudo pacman -S --needed \
-  base-devel clang pkgconf openssl \
+  base-devel clang nasm pkgconf openssl \
   libxkbcommon libx11 libxi libxcursor libxrandr libxss \
   wayland wayland-protocols \
   mesa vulkan-icd-loader \
@@ -35,7 +35,7 @@ Optional GPU ICD (pick for your GPU), e.g. `vulkan-intel` / `vulkan-radeon` /
 ```bash
 sudo apt update
 sudo apt install --no-install-recommends \
-  build-essential pkg-config clang \
+  build-essential pkg-config clang nasm \
   libssl-dev \
   libxkbcommon-dev libx11-dev libxi-dev libxcursor-dev libxrandr-dev libxss-dev \
   libwayland-dev wayland-protocols \
@@ -52,7 +52,7 @@ missing `.pc` file, install the matching `-dev` package.
 
 ```bash
 sudo dnf install \
-  gcc gcc-c++ make pkgconf-pkg-config clang \
+  gcc gcc-c++ make pkgconf-pkg-config clang nasm \
   openssl-devel \
   libxkbcommon-devel libX11-devel libXi-devel libXcursor-devel libXrandr-devel libXScrnSaver-devel \
   wayland-devel wayland-protocols-devel \
@@ -143,7 +143,7 @@ Arch packages (`.pkg.tar.zst`) are built on an Arch host with
 [`packaging/linux/PACKAGING.md`](packaging/linux/PACKAGING.md).
 
 - **`workflow_dispatch`**: upload Actions artifacts only (no Release).
-- **Push tag `v*`** (e.g. `v0.7.0` matching `Cargo.toml`): create a GitHub Release
+- **Push tag `v*`** (e.g. `v1.0.0-rc.2` matching `Cargo.toml`; a `-` version is published as a prerelease): create a GitHub Release
   attaching tarball + AppImage + `.deb`.
 
 Consumers on a compatible x86_64 glibc distro can run prebuilts without a local

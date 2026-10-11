@@ -8,7 +8,7 @@
 # Runtime VA-API / Vulkan GPU drivers stay on the host.
 
 pkgname=openuuyc
-pkgver=0.7.0
+pkgver=1.0.0rc2
 pkgrel=1
 pkgdesc="Native Linux controller for UU Remote (OpenUUYC)"
 arch=('x86_64')
@@ -41,6 +41,7 @@ optdepends=(
 )
 makedepends=(
   'cargo'
+  'nasm'
   'clang'
   'pkgconf'
   'openssl'

@@ -29,7 +29,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential pkg-config clang libclang-dev \
+            build-essential pkg-config clang libclang-dev nasm \
             libssl-dev \
             libxkbcommon-dev libx11-dev libxi-dev libxcursor-dev libxrandr-dev libxss-dev \
             libwayland-dev wayland-protocols \
@@ -202,4 +202,5 @@ jobs:
             "${APPIMAGE}" "${APPIMAGE_CHECKSUM}" \
             "${DEB}" "${DEB_CHECKSUM}" \
             --title "OpenUUYC ${VERSION} (Linux x86_64)" \
+            $([[ "${VERSION}" == *-* ]] && echo --prerelease) \
             --notes-file "${NOTES}"

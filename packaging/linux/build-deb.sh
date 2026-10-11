@@ -3,7 +3,7 @@
 #
 # Usage (repo root):
 #   ./packaging/linux/build-deb.sh
-#   OPENUUYC_BIN=/path/to/OpenUUYC VERSION=0.7.0 ./packaging/linux/build-deb.sh
+#   OPENUUYC_BIN=/path/to/OpenUUYC VERSION=1.0.0-rc.2 ./packaging/linux/build-deb.sh
 #
 # Output: dist/openuuyc_<version>_amd64.deb (+ .sha256)
 set -euo pipefail
@@ -13,6 +13,9 @@ ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "${ROOT}"
 
 VERSION="${VERSION:-"$("${SCRIPT_DIR}/version.sh")"}"
+# dpkg reads '-' as the revision separator; '~' sorts a prerelease before the
+# final release (1.0.0~rc.2 < 1.0.0).
+DEB_VERSION="${VERSION/-/\~}"
 ARCH_DEB="amd64"
 PKG_NAME="openuuyc"
 OUT_DIR="${OUT_DIR:-${ROOT}/dist}"
@@ -44,7 +47,7 @@ fi
 # clipboard file offer. GPU VA-API / Vulkan ICDs stay on the host (Recommends).
 cat > "${DEBIAN_DIR}/control" << CTRL
 Package: ${PKG_NAME}
-Version: ${VERSION}
+Version: ${DEB_VERSION}
 Section: net
 Priority: optional
 Architecture: ${ARCH_DEB}
