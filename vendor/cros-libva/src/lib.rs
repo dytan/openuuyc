@@ -17,10 +17,12 @@ mod image;
 mod picture;
 mod surface;
 mod usage_hint;
+pub mod vpp;
 
 pub use bindings::_VADRMPRIMESurfaceDescriptor__bindgen_ty_1 as VADRMPRIMESurfaceDescriptorObject;
 pub use bindings::_VADRMPRIMESurfaceDescriptor__bindgen_ty_2 as VADRMPRIMESurfaceDescriptorLayer;
 pub use bindings::*;
+pub use vpp::VppContext;
 pub use buffer::*;
 pub use config::*;
 pub use context::*;

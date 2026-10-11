@@ -306,4 +306,42 @@ impl Encoder {
                 .collect()),
         }
     }
+
+    /// True when the active backend can scale+CSC on the GPU via VPP.
+    pub(crate) fn vpp_available(&self) -> bool {
+        match &self.inner {
+            Inner::Vaapi(v) => v.vpp_available(),
+            Inner::Software(_) => false,
+        }
+    }
+
+    /// GPU VPP path: encode a full-resolution BGRA frame, scaling + converting on
+    /// the GPU. `src_pitch` is the source row stride in bytes. VA-API only.
+    pub(crate) fn encode_scaled(
+        &mut self,
+        bgra: &[u8],
+        src_w: u32,
+        src_h: u32,
+        src_pitch: usize,
+        timestamp: i64,
+        keyframe: bool,
+    ) -> Result<Vec<Encoded>> {
+        let color = format::Color::Sdr.space(None);
+        match &mut self.inner {
+            Inner::Vaapi(v) => Ok(v
+                .encode_scaled(bgra, src_w, src_h, src_pitch, timestamp, keyframe)?
+                .into_iter()
+                .map(|p| Encoded {
+                    data: p.data,
+                    keyframe: p.keyframe,
+                    timestamp_100ns: timestamp,
+                    is_new: true,
+                    timing: None,
+                    format: self.format,
+                    color,
+                })
+                .collect()),
+            Inner::Software(_) => anyhow::bail!("软件编码器不支持 GPU VPP"),
+        }
+    }
 }

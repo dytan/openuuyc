@@ -286,6 +286,89 @@ pub fn run(bench: Option<u32>) -> Result<String> {
                 } else {
                     line!("  ✗ VA-API 码流解码存在问题，请勿启用硬件编码");
                 }
+
+                // GPU VPP path: full-res capture -> VA surface upload -> VPP
+                // scale+CSC -> encode, measured and decode-validated separately.
+                if va.vpp_available() {
+                    line!("");
+                    line!("VA-API VPP 基准：{frames} 帧（全分辨率采集→GPU VPP缩放+转换→GPU编码→解码校验）");
+                    let mut vp_grab = Vec::new();
+                    let mut vp_norm = Vec::new();
+                    let mut vp_enc = Vec::new();
+                    let mut vp_bytes = 0usize;
+                    let mut vp_units: Vec<Vec<u8>> = Vec::new();
+                    let mut vp_frames = 0u32;
+                    let started = Instant::now();
+                    for i in 0..frames {
+                        let Some((bgra, sw_w, sw_h, grab, norm)) =
+                            desktop.next_full(100).context("VPP 基准采集失败")?
+                        else {
+                            continue;
+                        };
+                        let enc_started = Instant::now();
+                        let force = i % 60 == 0;
+                        let packets = match va.encode_scaled(
+                            &bgra,
+                            sw_w,
+                            sw_h,
+                            sw_w as usize * 4,
+                            (i as i64) * 10_000,
+                            force,
+                        ) {
+                            Ok(p) => p,
+                            Err(e) => {
+                                line!("  VPP 编码失败（将回退当前路径）：{e:#}");
+                                break;
+                            }
+                        };
+                        vp_enc.push(enc_started.elapsed().as_secs_f64() * 1000.0);
+                        vp_grab.push(grab.as_secs_f64() * 1000.0);
+                        vp_norm.push(norm.as_secs_f64() * 1000.0);
+                        for pk in &packets {
+                            vp_bytes += pk.data.len();
+                            if vp_units.len() < 240 {
+                                vp_units.push(pk.data.clone());
+                            }
+                        }
+                        vp_frames += 1;
+                    }
+                    let elapsed = started.elapsed();
+                    if vp_frames > 0 {
+                        let mut swd = openuuyc_codec::decoder::Decoder::new(
+                            openuuyc_codec::Codec::H264,
+                            &[],
+                        )
+                        .context("创建软件解码器失败")?;
+                        let mut sw_errors = 0u32;
+                        let mut sw_decoded = 0usize;
+                        for u in &vp_units {
+                            match swd.push(u, 0) {
+                                Ok(fr) => sw_decoded += fr.len(),
+                                Err(_) => sw_errors += 1,
+                            }
+                        }
+                        line!("  码流: {} KB", vp_bytes / 1024);
+                        line!("  screencopy 抓帧:   p50 {:.1} ms  p95 {:.1} ms", pct(&mut vp_grab.clone(), 0.50), pct(&mut vp_grab.clone(), 0.95));
+                        line!("  CPU 归一化(全幅):  p50 {:.1} ms  p95 {:.1} ms", pct(&mut vp_norm.clone(), 0.50), pct(&mut vp_norm.clone(), 0.95));
+                        line!("  上传+VPP+编码:     p50 {:.1} ms  p95 {:.1} ms", pct(&mut vp_enc.clone(), 0.50), pct(&mut vp_enc.clone(), 0.95));
+                        let fps = vp_frames as f64 / elapsed.as_secs_f64();
+                        line!("  串行可达帧率:       {:.1} fps（{} 帧用时 {} ms）", fps, vp_frames, elapsed.as_millis());
+                        line!("  软件解码校验: 还原 {sw_decoded} 帧, 解码错误 {sw_errors} 个");
+                        match crate::platform::linux::decoder::vaapi_decode_roundtrip(frame.width, frame.height, &vp_units) {
+                            Ok(n) => line!("  VA-API 解码校验: 还原 {n} 帧"),
+                            Err(e) => line!("  VA-API 解码校验: 不可用（{e:#}）"),
+                        }
+                        if sw_errors == 0 && sw_decoded > 0 {
+                            line!("  ✓ VPP 路径码流解码干净");
+                        } else {
+                            line!("  ✗ VPP 路径码流解码存在问题");
+                        }
+                    } else {
+                        line!("  VPP 基准无有效帧");
+                    }
+                } else {
+                    line!("  （VA-API VPP 不可用，跳过 GPU 缩放基准）");
+                }
             }
         }
     }

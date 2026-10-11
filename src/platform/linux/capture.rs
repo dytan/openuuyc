@@ -283,6 +283,41 @@ impl Desktop {
         };
         Ok(Some((frame, grab_dur, scale_dur)))
     }
+
+    /// Grab one frame at native resolution, normalised to packed BGRA (B,G,R,X),
+    /// for the GPU VPP path. Returns the pixels, dimensions, and the grab and
+    /// CPU-normalise durations. Only implemented for the Wayland backend.
+    pub fn next_full(
+        &mut self,
+        timeout: u32,
+    ) -> Result<Option<(Vec<u8>, u32, u32, Duration, Duration)>> {
+        let timeout = Duration::from_millis(u64::from(timeout.max(1)));
+        match &mut self.backend {
+            Backend::Wayland(copy) => {
+                let overlay_cursor = !super::host::pointer::available();
+                let grab_started = Instant::now();
+                let grabbed = copy.grab(overlay_cursor, timeout)?;
+                let grab_dur = grab_started.elapsed();
+                let Some(raw) = grabbed else { return Ok(None) };
+                let mut out = Vec::new();
+                let norm_started = Instant::now();
+                scale::convert(
+                    raw.data,
+                    raw.width,
+                    raw.height,
+                    raw.stride as usize,
+                    raw.rgb,
+                    raw.y_invert,
+                    raw.width,
+                    raw.height,
+                    &mut out,
+                );
+                let norm_dur = norm_started.elapsed();
+                Ok(Some((out, raw.width, raw.height, grab_dur, norm_dur)))
+            }
+            Backend::X11(_) => Ok(None),
+        }
+    }
 }
 
 fn target(width: u32, height: u32, quality: i32, maximum: (u32, u32)) -> (u32, u32) {

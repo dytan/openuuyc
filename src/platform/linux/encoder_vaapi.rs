@@ -43,6 +43,10 @@ pub(super) struct Encoder {
     context: Rc<Context>,
     _config: Config,
     image_fmt: VAImageFormat,
+    bgra_fmt: Option<VAImageFormat>,
+    vpp: Option<cros_libva::VppContext>,
+    src_surface: Option<Surface<()>>,
+    src_dims: (u32, u32),
     // Two surfaces ping-ponged between "current" and "reference".
     surfaces: [Option<Surface<()>>; 2],
     coded: EncCodedBuffer,
@@ -57,6 +61,10 @@ pub(super) struct Encoder {
     cabac: bool,
     rc: Rc_,
     bitrate: u32,
+    observed_fps: f32,
+    last_encode_at: Option<std::time::Instant>,
+    applied_bitrate: u32,
+    applied_fps: u32,
     fps: u32,
     gop: u32,
     // Encode state.
@@ -165,6 +173,20 @@ impl Encoder {
             .find(|f| f.fourcc == FOURCC_NV12)
             .context("VA-API 驱动未提供 NV12 图像格式")?;
 
+        // Optional GPU scale+CSC path: a BGRX image format and a VPP context.
+        // Failure here just disables the VPP path; the CPU upload still works.
+        let bgra_fmt = display
+            .query_image_formats()
+            .ok()
+            .and_then(|fmts| fmts.into_iter().find(|f| f.fourcc == cros_libva::VA_FOURCC_BGRX));
+        let vpp = match cros_libva::VppContext::new(Rc::clone(&display), aligned_w, aligned_h) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                tracing::warn!(error = %e, "VA-API VPP 不可用，回退 CPU 转换");
+                None
+            }
+        };
+
         let level_idc = 51; // 5.1: ample headroom up to 4K.
         // Intel's low-power VDEnc entropy support is CABAC; ConstrainedBaseline
         // forbids CABAC, so Main/High must declare CABAC in both the PPS and the
@@ -196,8 +218,12 @@ impl Encoder {
             cabac,
             rc,
             bitrate: bitrate.max(300_000),
+            observed_fps: fps.clamp(1, 240) as f32,
+            last_encode_at: None,
+            applied_bitrate: 0,
+            applied_fps: 0,
             fps: fps.clamp(1, 240),
-            gop: 300,
+            gop: 3600,
             slot: 0,
             frame_count: 0,
             frame_num: 0,
@@ -211,6 +237,10 @@ impl Encoder {
             pps: Vec::new(),
             nv12_pad: Vec::new(),
             driver_inserts_headers: None,
+            bgra_fmt,
+            vpp,
+            src_surface: None,
+            src_dims: (0, 0),
         };
         enc.sps = enc.build_sps();
         enc.pps = build_pps(enc.cabac);
@@ -245,14 +275,134 @@ impl Encoder {
             "采集帧尺寸与 VA-API 编码器不一致"
         );
 
-        let is_idr = force || !self.have_ref || self.frame_count % self.gop == 0;
-
         // Take the current surface slot and upload NV12 into it.
         let surface = self.surfaces[self.slot]
             .take()
             .context("VA-API 编码表面缺失")?;
         let curr_surface_id = surface.id();
         self.upload_nv12(&surface, bgra, pitch)?;
+        self.finish_encode(surface, curr_surface_id, force)
+    }
+
+    /// VA-API VPP path: scale + colour-convert a full-res BGRA frame on the GPU
+    /// into the NV12 encode surface, then encode. `src_pitch` is the source row
+    /// stride in bytes. Caller falls back to the CPU path on Err.
+    pub(super) fn encode_scaled(
+        &mut self,
+        bgra: &[u8],
+        src_w: u32,
+        src_h: u32,
+        src_pitch: usize,
+        _timestamp: i64,
+        force: bool,
+    ) -> Result<Vec<Packet>> {
+        ensure!(self.vpp.is_some(), "VA-API VPP 未初始化");
+        ensure!(
+            src_w >= 2 && src_h >= 2 && src_w % 2 == 0 && src_h % 2 == 0,
+            "VPP 源尺寸非法: {src_w}x{src_h}"
+        );
+        ensure!(
+            src_pitch >= src_w as usize * 4 && bgra.len() >= src_pitch * src_h as usize,
+            "VPP 源帧尺寸不足"
+        );
+        self.ensure_src_surface(src_w, src_h)?;
+        self.upload_bgra(src_w, src_h, src_pitch, bgra)?;
+        let src_id = self.src_surface.as_ref().context("VPP 源表面缺失")?.id();
+
+        let surface = self.surfaces[self.slot]
+            .take()
+            .context("VA-API 编码表面缺失")?;
+        let curr_surface_id = surface.id();
+        self.vpp
+            .as_ref()
+            .unwrap()
+            .blit(src_id, (src_w, src_h), curr_surface_id, (self.width, self.height))
+            .map_err(|e| anyhow::anyhow!("VA-API VPP 处理失败: {e}"))?;
+        self.finish_encode(surface, curr_surface_id, force)
+    }
+
+    pub(super) fn vpp_available(&self) -> bool {
+        self.vpp.is_some() && self.bgra_fmt.is_some()
+    }
+
+    fn ensure_src_surface(&mut self, src_w: u32, src_h: u32) -> Result<()> {
+        if self.src_dims == (src_w, src_h) && self.src_surface.is_some() {
+            return Ok(());
+        }
+        let surfaces = self
+            .display
+            .create_surfaces::<()>(
+                cros_libva::VA_RT_FORMAT_RGB32,
+                Some(cros_libva::VA_FOURCC_BGRX),
+                src_w,
+                src_h,
+                Some(UsageHint::USAGE_HINT_VPP_READ),
+                vec![()],
+            )
+            .map_err(|e| anyhow::anyhow!("创建 VPP 源表面失败: {e}"))?;
+        self.src_surface = surfaces.into_iter().next();
+        self.src_dims = (src_w, src_h);
+        Ok(())
+    }
+
+    fn upload_bgra(&mut self, src_w: u32, src_h: u32, src_pitch: usize, bgra: &[u8]) -> Result<()> {
+        let fmt = self.bgra_fmt.context("VPP 缺少 BGRX 图像格式")?;
+        let surface = self.src_surface.as_ref().context("VPP 源表面缺失")?;
+        let mut image = Image::create_from(surface, fmt, (src_w, src_h), (src_w, src_h))
+            .map_err(|e| anyhow::anyhow!("创建 VPP 上传图像失败: {e}"))?;
+        let va = *image.image();
+        let off = va.offsets[0] as usize;
+        let dpitch = va.pitches[0] as usize;
+        let row = (src_w as usize) * 4;
+        let dst = image.as_mut();
+        for y in 0..src_h as usize {
+            let d = off + y * dpitch;
+            let srow = y * src_pitch;
+            dst[d..d + row].copy_from_slice(&bgra[srow..srow + row]);
+        }
+        drop(image); // vaPutImage uploads on drop.
+        Ok(())
+    }
+
+    fn finish_encode(
+        &mut self,
+        surface: Surface<()>,
+        curr_surface_id: VASurfaceID,
+        force: bool,
+    ) -> Result<Vec<Packet>> {
+        let is_idr = force || !self.have_ref || self.frame_count % self.gop == 0;
+
+        // Track the delivered frame rate so CBR budgets bits/frame against
+        // reality instead of the nominal fps; otherwise, when we deliver ~14 of
+        // a requested 60 fps, the driver only emits ~14/60 of the target rate
+        // and the link sits half-empty (visible quality drops).
+        let now = std::time::Instant::now();
+        if let Some(prev) = self.last_encode_at {
+            let dt = now.duration_since(prev).as_secs_f32();
+            if dt > 0.003 && dt < 2.0 {
+                self.observed_fps = 0.8 * self.observed_fps + 0.2 * (1.0 / dt);
+            }
+        }
+        self.last_encode_at = Some(now);
+        let eff_fps = self
+            .observed_fps
+            .round()
+            .clamp(5.0, self.fps.clamp(1, 240) as f32) as u32;
+        // Only reset the bitrate-control accumulator when something actually
+        // changed; resetting every frame would wreck rate control.
+        let rate_changed = self.bitrate.abs_diff(self.applied_bitrate) > self.applied_bitrate / 20;
+        let reset_rc = is_idr || rate_changed || self.applied_fps != eff_fps;
+        self.applied_bitrate = self.bitrate;
+        self.applied_fps = eff_fps;
+        if reset_rc {
+            tracing::debug!(
+                bitrate = self.bitrate,
+                eff_fps,
+                observed_fps = self.observed_fps,
+                is_idr,
+                "VA-API 码率控制更新"
+            );
+        }
 
         // Picture order + reference bookkeeping.
         let (slice_type, frame_num, poc) = if is_idr {
@@ -265,7 +415,8 @@ impl Encoder {
             (0u8, fnum, poc) // P slice; frame_num here is prev ref's
         };
 
-        let buffers = self.build_frame_buffers(curr_surface_id, is_idr, slice_type, frame_num, poc)?;
+        let buffers =
+            self.build_frame_buffers(curr_surface_id, is_idr, slice_type, frame_num, poc, reset_rc, eff_fps)?;
 
         // Render.
         let mut picture = Picture::new(self.frame_count as u64, Rc::clone(&self.context), surface);
@@ -340,6 +491,8 @@ impl Encoder {
         slice_type: u8,
         frame_num: u16,
         poc: i32,
+        reset_rc: bool,
+        eff_fps: u32,
     ) -> Result<Vec<cros_libva::Buffer>> {
         let mut buffers = Vec::new();
 
@@ -389,14 +542,16 @@ impl Encoder {
                     .map_err(|e| anyhow::anyhow!("创建 seq 缓冲失败: {e}"))?,
             );
 
-            // Rate control misc buffers.
-            for mb in self.rate_control_buffers() {
-                buffers.push(
-                    self.context
-                        .create_buffer(BufferType::EncMiscParameter(mb))
-                        .map_err(|e| anyhow::anyhow!("创建码率控制缓冲失败: {e}"))?,
-                );
-            }
+        }
+
+        // Rate-control misc buffers are sent EVERY frame (not just on IDR) so
+        // mid-session bitrate/fps updates take effect immediately.
+        for mb in self.rate_control_buffers(reset_rc, eff_fps) {
+            buffers.push(
+                self.context
+                    .create_buffer(BufferType::EncMiscParameter(mb))
+                    .map_err(|e| anyhow::anyhow!("创建码率控制缓冲失败: {e}"))?,
+            );
         }
 
         // Picture parameters.
@@ -503,13 +658,14 @@ impl Encoder {
         Ok(buffers)
     }
 
-    fn rate_control_buffers(&self) -> Vec<EncMiscParameter> {
+    fn rate_control_buffers(&self, reset: bool, eff_fps: u32) -> Vec<EncMiscParameter> {
         let mut out = Vec::new();
         if matches!(self.rc, Rc_::Cbr | Rc_::Vbr) {
             let target_percentage = if matches!(self.rc, Rc_::Cbr) { 100 } else { 95 };
-            // Small VBV (~0.5s) for low latency.
+            // ~0.5s VBV: smooths complex frames without adding noticeable latency.
             let window_ms = 500u32;
-            let rc_flags = RcFlags::new(1, 0, 0, 0, 0, 0, 0, 0, 0);
+            // reset only when the rate actually changed, so BRC state survives.
+            let rc_flags = RcFlags::new(u32::from(reset), 0, 0, 0, 0, 0, 0, 0, 0);
             let rc = EncMiscParameterRateControl::new(
                 self.bitrate,
                 target_percentage,
@@ -519,7 +675,7 @@ impl Encoder {
                 0,
                 rc_flags,
                 0,
-                51,
+                48, // max_qp: cap worst-case ugliness
                 0,
                 0,
             );
@@ -530,7 +686,7 @@ impl Encoder {
             out.push(EncMiscParameter::HRD(EncMiscParameterHRD::new(initial, buffer_size)));
         }
         out.push(EncMiscParameter::FrameRate(EncMiscParameterFrameRate::new(
-            self.fps.max(1),
+            eff_fps.max(1),
             0,
         )));
         out
