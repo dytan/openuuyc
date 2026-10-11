@@ -547,16 +547,24 @@ fn process(state: &mut State, command: Command) {
         }
         Command::Offer(weak, epoch, formats, action) => {
             if let Some(session) = weak.upgrade().filter(|session| session.valid(epoch)) {
+                let names: Vec<_> = formats.iter().map(|f| f.name.as_str()).collect();
+                tracing::info!(
+                    id = session.id,
+                    formats = ?names,
+                    has_action = action.is_some(),
+                    "收到远端剪贴板 FormatList"
+                );
                 let result = if let Some(action) = action {
-                    // Mac/Windows viewer drag-onto-video sends OleDrop; AutoSave
-                    // is the host→controller send. Neither has a Wayland OLE
-                    // equivalent, so both land in the user's Downloads folder.
+                    // OleDrop/AutoSave: save into Downloads (drag path; skipped for now
+                    // in product priority, but keep the handler so drops are not lost).
                     receive_drop(session.clone(), epoch, formats, action)
                 } else {
-                    accept_offer(state, &session, epoch, formats)
+                    // Fetch + write must not block this worker: session.data() waits on
+                    // peer replies that this same thread must keep pumping.
+                    accept_offer_async(session.clone(), epoch, formats)
                 };
                 if let Err(error) = result {
-                    tracing::debug!(error = format!("{error:#}"), "接受远端剪贴板失败");
+                    tracing::warn!(error = format!("{error:#}"), "接受远端剪贴板失败");
                     session.fail(error.to_string());
                 }
             }
@@ -703,6 +711,170 @@ fn receive_drop(
     Ok(())
 }
 
+/// Run `accept_offer` on a worker so the native loop can keep dispatching
+/// FileContents / FormatData replies that `session.data()` waits on.
+fn accept_offer_async(
+    session: Arc<Inner>,
+    epoch: u64,
+    formats: Vec<ClipboardFormat>,
+) -> Result<()> {
+    std::thread::Builder::new()
+        .name("clipboard accept".into())
+        .spawn(move || {
+            // A private State slice is not available here; we write through a
+            // short-lived arboard handle and also ask the main worker to adopt
+            // the snapshot via a side channel would be ideal. For text/image we
+            // write directly with wl-copy/arboard; for files we still need the
+            // main worker's FUSE mount. Post back a synthetic local-only path:
+            if let Err(error) = accept_offer_standalone(session.clone(), epoch, formats) {
+                tracing::warn!(error = format!("{error:#}"), "应用远端剪贴板失败");
+                session.fail(error.to_string());
+            }
+        })?;
+    Ok(())
+}
+
+/// Apply a remote FormatList without the main `State` (text/image via arboard /
+/// wl-copy; files fall back to posting a follow-up that the worker mounts).
+fn accept_offer_standalone(
+    session: Arc<Inner>,
+    epoch: u64,
+    offered: Vec<ClipboardFormat>,
+) -> Result<()> {
+    if offered.is_empty() {
+        return Ok(());
+    }
+    let platform = session.platform.load(Ordering::Acquire);
+    let files = session.file_allowed();
+    let links: Vec<Format> = offered
+        .into_iter()
+        .filter_map(|format| formats::incoming(format, platform, files))
+        .collect();
+    tracing::info!(
+        locals = ?links.iter().map(|l| l.local).collect::<Vec<_>>(),
+        wires = ?links.iter().map(|l| l.wire.name.as_str()).collect::<Vec<_>>(),
+        "远端剪贴板格式已解析"
+    );
+    if files && links.iter().any(|link| link.local == descriptor_format()) {
+        // File offers need FUSE on the main worker; re-post without action is
+        // wrong (would loop). Use the import path into Downloads instead — same
+        // as an explicit drop, which is what users expect for a remote file copy.
+        return receive_drop(
+            session,
+            epoch,
+            links.iter().map(|l| l.wire.clone()).collect(),
+            ClipboardFormatListRequestKind::OleDrop(DragDropOleDrop {
+                screen_id: 0,
+                target_x: 0.5,
+                target_y: 0.5,
+            }),
+        );
+    }
+    let Some(format) = [13u32, 1, 8, 17]
+        .into_iter()
+        .find_map(|id| links.iter().find(|format| format.local == id))
+        .cloned()
+    else {
+        tracing::warn!("远端剪贴板没有可识别的文本/图片格式");
+        return Ok(());
+    };
+    let data = session.data(epoch, &format.wire)?;
+    ensure!(data.len() <= MAX_CLIP, "剪贴板内容过大");
+    let data = formats::convert(data, &format, platform, false)?;
+    match format.local {
+        13 => {
+            let text = utf16_text(&data)?;
+            write_text_external(&text)?;
+            tracing::info!(chars = text.len(), "已写入远端文本到本地剪贴板");
+        }
+        1 => {
+            let text = String::from_utf8_lossy(&data)
+                .trim_end_matches('\0')
+                .replace("\r\n", "\n");
+            write_text_external(&text)?;
+            tracing::info!(chars = text.len(), "已写入远端文本到本地剪贴板");
+        }
+        8 | 17 => {
+            write_image_external(&data)?;
+            tracing::info!(bytes = data.len(), "已写入远端图片到本地剪贴板");
+        }
+        _ => return Ok(()),
+    }
+    *lock(&session.error) = None;
+    Ok(())
+}
+
+fn write_text_external(text: &str) -> Result<()> {
+    // Prefer wl-copy: it forks a helper that stays alive for Wayland pastes.
+    // Fall back to arboard when wl-copy is missing.
+    match std::process::Command::new("wl-copy")
+        .arg("--type")
+        .arg("text/plain;charset=utf-8")
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            if let Some(stdin) = child.stdin.as_mut() {
+                stdin.write_all(text.as_bytes())?;
+            }
+            child.wait()
+        }) {
+        Ok(status) if status.success() => return Ok(()),
+        Ok(status) => tracing::debug!(?status, "wl-copy 写入失败，回退 arboard"),
+        Err(error) => tracing::debug!(%error, "wl-copy 不可用，回退 arboard"),
+    }
+    let mut clipboard = arboard::Clipboard::new().context("系统剪贴板不可用")?;
+    clipboard
+        .set_text(text.to_owned())
+        .context("写入系统剪贴板失败")?;
+    // Keep this handle alive briefly so wlr-data-control peers can fetch.
+    std::thread::sleep(Duration::from_millis(50));
+    Ok(())
+}
+
+fn write_image_external(dib: &[u8]) -> Result<()> {
+    let (w, h, rgba) = dib_to_rgba(dib)?;
+    // PNG via wl-copy when available.
+    if let Ok(png) = rgba_to_png(w, h, &rgba) {
+        match std::process::Command::new("wl-copy")
+            .arg("--type")
+            .arg("image/png")
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .and_then(|mut child| {
+                use std::io::Write;
+                if let Some(stdin) = child.stdin.as_mut() {
+                    stdin.write_all(&png)?;
+                }
+                child.wait()
+            }) {
+            Ok(status) if status.success() => return Ok(()),
+            Ok(status) => tracing::debug!(?status, "wl-copy 图片写入失败，回退 arboard"),
+            Err(error) => tracing::debug!(%error, "wl-copy 图片不可用，回退 arboard"),
+        }
+    }
+    let mut clipboard = arboard::Clipboard::new().context("系统剪贴板不可用")?;
+    clipboard
+        .set_image(arboard::ImageData {
+            width: w as usize,
+            height: h as usize,
+            bytes: std::borrow::Cow::Owned(rgba),
+        })
+        .context("写入系统剪贴板失败")?;
+    std::thread::sleep(Duration::from_millis(50));
+    Ok(())
+}
+
+fn rgba_to_png(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>> {
+    use image::{ImageBuffer, ImageFormat, Rgba};
+    let img: ImageBuffer<Rgba<u8>, _> = ImageBuffer::from_raw(width, height, rgba.to_vec())
+        .context("RGBA 尺寸与数据不匹配")?;
+    let mut out = Vec::new();
+    img.write_to(&mut std::io::Cursor::new(&mut out), ImageFormat::Png)
+        .context("PNG 编码失败")?;
+    Ok(out)
+}
+
 /// Fetch the best offered format now, because the local clipboard cannot
 /// promise data it does not yet hold.
 fn accept_offer(
@@ -809,11 +981,10 @@ fn utf16_text(bytes: &[u8]) -> Result<String> {
 }
 
 fn write_text(state: &mut State, text: &str) -> Result<()> {
-    let clipboard = state.clipboard.as_mut().context("系统剪贴板不可用")?;
     state.writing = true;
-    let result = clipboard.set_text(text.to_owned());
+    let result = write_text_external(text);
     state.writing = false;
-    result.context("写入系统剪贴板失败")?;
+    result?;
     state.local = LocalSnapshot {
         text: Some(text.to_owned()),
         ..Default::default()
@@ -966,14 +1137,12 @@ fn poll_local(state: &mut State) -> Result<()> {
     {
         return Ok(());
     }
-    if !state.local.sources.is_empty() || !snapshot.sources.is_empty() {
-        tracing::debug!(
-            files = snapshot.sources.len(),
-            text = snapshot.text.is_some(),
-            image = snapshot.image.is_some(),
-            "本地剪贴板已变化"
-        );
-    }
+    tracing::info!(
+        files = snapshot.sources.len(),
+        text = snapshot.text.as_ref().map(String::len),
+        image = snapshot.image.as_ref().map(Vec::len),
+        "本地剪贴板已变化"
+    );
     state.local = snapshot;
     // The previous copy is gone; a read still in flight against it now fails.
     state.tasks.clear();
@@ -999,6 +1168,8 @@ fn publish_local(state: &mut State) -> Result<()> {
             continue;
         }
         state.published.insert(session.id, links.clone());
+        let wires: Vec<_> = links.iter().map(|f| f.wire.name.clone()).collect();
+        tracing::info!(id = session.id, formats = ?wires, "向远端发布本地剪贴板");
         session.emit(
             session.epoch.load(Ordering::Acquire),
             request(

@@ -286,7 +286,10 @@ async fn binding(
                         // Native drag is Windows-only; ignore.
                         continue;
                     }
-                    clipboard.receive(&message)?;
+                    tracing::debug!(bytes = message.len(), "host clipboard packet");
+                    if let Err(error) = clipboard.receive(&message) {
+                        tracing::warn!(error = format!("{error:#}"), "处理远端剪贴板消息失败");
+                    }
                 }
                 packet = out_rx.recv() => {
                     let Some(packet) = packet else { break; };
