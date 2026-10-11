@@ -389,6 +389,7 @@ impl Peer {
             },
         )
         .await?;
+        tracing::debug!("host connect: peer connection core ready");
         let connection = core.connection.clone();
         // Failed construction cancels role workers; the core owns transport cleanup.
         let construction = cancel.clone().drop_guard();
@@ -435,6 +436,7 @@ impl Peer {
             deferred,
         )
         .await?;
+        tracing::debug!("host connect: video track pool ready");
         let sender = screen_pool.slots[0].sender.clone();
         let reports = screen_pool.reports.clone();
         let input_reports = reports.clone();
@@ -457,8 +459,10 @@ impl Peer {
                     .collect(),
             },
         )?;
+        tracing::debug!("host connect: input session ready");
         let microphone =
             super::microphone::Session::new(handle.clone(), cancel.clone(), connected.clone())?;
+        tracing::debug!("host connect: microphone session ready");
         let microphone_tracks = Arc::new(Mutex::new(Vec::new()));
         let track_tasks = microphone_tracks.clone();
         let track_microphone = microphone.receiver();

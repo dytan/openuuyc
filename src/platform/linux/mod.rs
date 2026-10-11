@@ -34,6 +34,9 @@ pub(crate) mod wol;
 pub(crate) const UNSUPPORTED: &str = "Linux 版本暂不支持本机被控功能";
 
 pub(crate) fn unsupported<T>() -> anyhow::Result<T> {
+    // Pinpoint which host-side shim was reached; most are optional sub-features
+    // whose callers degrade, but a new one on the connect path shows up here.
+    tracing::debug!(backtrace = ?std::backtrace::Backtrace::capture(), "linux host shim: unsupported");
     anyhow::bail!(UNSUPPORTED)
 }
 

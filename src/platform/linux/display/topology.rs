@@ -56,9 +56,12 @@ pub(crate) struct Target {
     pub dpi: Option<Dpi>,
 }
 
-pub(crate) struct Topology {
-    _never: std::convert::Infallible,
-}
+/// Linux has no Windows-style display topology service. Screen enumeration
+/// comes from `capture::screens()` (Wayland outputs / display-info), so the
+/// topology is an empty, read-only handle: it never owns targets, and any
+/// mutation (resolution/DPI/virtual display) remains unsupported and degrades
+/// with a clear message instead of aborting the controlled session.
+pub(crate) struct Topology;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct SavedTarget {
@@ -82,22 +85,26 @@ pub(crate) struct SavedTopology {
 
 impl Topology {
     pub(crate) fn snapshot(&self) -> Result<SavedTopology> {
-        crate::platform::linux::unsupported()
+        // No topology to journal on Linux; an empty snapshot restores to a no-op.
+        Ok(SavedTopology::default())
     }
     pub(crate) fn query(active_only: bool) -> Result<Self> {
-        crate::platform::linux::unsupported()
+        // Physical outputs are enumerated by capture::screens(); the topology
+        // itself carries no extra targets on Linux.
+        Ok(Self)
     }
     pub(crate) fn targets(&self) -> Result<Vec<Target>> {
-        crate::platform::linux::unsupported()
+        Ok(Vec::new())
     }
     pub(crate) fn metadata(&self) -> Result<Vec<Target>> {
-        crate::platform::linux::unsupported()
+        Ok(Vec::new())
     }
 }
 
 impl SavedTopology {
     pub(crate) fn apply(&self) -> Result<Vec<String>> {
-        crate::platform::linux::unsupported()
+        // No topology to restore on Linux; report that nothing changed.
+        Ok(Vec::new())
     }
 }
 

@@ -304,9 +304,12 @@ impl Screens {
             before_super: None,
             headless: Default::default(),
         };
+        tracing::debug!("host connect: display inventory read");
         state.refresh()?;
+        tracing::debug!("host connect: display inventory applied");
         if let Some(selected) = selected {
             state.start_at(0, selected, initial).await?;
+            tracing::debug!("host connect: initial capture started");
         }
         Ok(state)
     }
