@@ -1294,6 +1294,14 @@ impl Lease {
         if !self.current_owner(&state) {
             return;
         }
+        #[cfg(not(windows))]
+        for value in &updates {
+            if value.receiving
+                && value.state == crate::features::file_transfer::host::notices::COMPLETE
+            {
+                notify_file_received(value);
+            }
+        }
         let notices = &mut state.status.file_transfers;
         let now = chrono::Utc::now().timestamp();
         notices.retain(|v| v.state == 0 || now.saturating_sub(v.updated) < 120);
@@ -1337,4 +1345,44 @@ impl Lease {
             state.status.error = Some(error);
         });
     }
+}
+
+/// Post a desktop notification once per completed incoming transfer (Linux).
+/// Dedup by notice id; `notify-send` runs on a short detached thread so the
+/// transfer path never blocks and the child is reaped (no zombies). Missing
+/// `notify-send` is ignored — the in-app progress list is the source of truth.
+#[cfg(not(windows))]
+fn notify_file_received(notice: &crate::features::file_transfer::host::notices::Notice) {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+    static SEEN: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let mut seen = SEEN
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if notice.id.is_empty() || !seen.insert(notice.id.clone()) {
+        return;
+    }
+    if seen.len() > 512 {
+        seen.clear();
+        seen.insert(notice.id.clone());
+    }
+    let name = if notice.name.is_empty() {
+        "文件".to_owned()
+    } else {
+        notice.name.clone()
+    };
+    let body = if notice.saved > 1 {
+        format!("已接收 {} 个文件：{name} 等", notice.saved)
+    } else {
+        format!("已接收文件：{name}")
+    };
+    std::thread::spawn(move || {
+        let _ = std::process::Command::new("notify-send")
+            .arg("--app-name=OpenUUYC")
+            .arg("--icon=document-save")
+            .arg("OpenUUYC 文件传输")
+            .arg(body)
+            .status();
+    });
 }

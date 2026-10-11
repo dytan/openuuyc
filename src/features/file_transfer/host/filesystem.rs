@@ -168,10 +168,13 @@ pub(super) fn directory(value: &str) -> Result<PathBuf> {
 }
 fn parent_locks(path: &Path) -> Result<Vec<File>> {
     let parent = path.parent().context("不能修改磁盘根目录")?;
+    #[cfg(windows)]
     let root = PathBuf::from(format!(
         "{}:\\",
         path.to_string_lossy().as_bytes()[0] as char
     ));
+    #[cfg(not(windows))]
+    let root = PathBuf::from("/");
     let rel = path.strip_prefix(&root)?;
     ensure!(
         parent != path && rel.components().count() > 0,

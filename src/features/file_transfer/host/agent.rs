@@ -1,5 +1,6 @@
 //! Same protocol engine in portable mode and in an ordinary-user service child.
 use super::*;
+#[cfg(windows)]
 use crate::platform::windows::host_service::{pipe::Pipe, process, vault};
 use std::{
     sync::{
@@ -8,6 +9,7 @@ use std::{
     },
     time::{Duration, Instant},
 };
+#[cfg(windows)]
 const PREFIX: &str = r"\\.\pipe\OpenUUYC.Files.";
 #[derive(prost::Message)]
 struct Request {
@@ -192,11 +194,13 @@ impl Drop for Local {
     }
 }
 
+#[cfg(windows)]
 struct Remote {
     pipe: Pipe,
     agent: crate::platform::windows::host_service::user_backend::Lease,
     session: u32,
 }
+#[cfg(windows)]
 impl Remote {
     fn new(stop: &CancellationToken) -> Result<Self> {
         let session = process::active_session();
@@ -233,6 +237,7 @@ impl Remote {
         .map_err(Into::into)
     }
 }
+#[cfg(windows)]
 fn worker(
     scope: String,
     mut input: mpsc::Receiver<(u64, Vec<u8>)>,
@@ -368,6 +373,7 @@ fn worker(
     drop(local);
     if stop.is_cancelled() { Ok(()) } else { result }
 }
+#[cfg(windows)]
 pub(crate) fn run(name: &str, parent: u32) -> Result<()> {
     ensure!(
         name.starts_with(PREFIX) && name.len() < 150,
@@ -405,4 +411,84 @@ pub(crate) fn run(name: &str, parent: u32) -> Result<()> {
         }
     }
     Ok(())
+}
+
+// The Linux controlled process already runs as the user's own session, so the
+// file engine runs directly in-process. There is no privileged service that
+// must hand disk work to an ordinary-user agent over a pipe, and no SYSTEM
+// identity to detect: the portable `Local` engine is always available.
+#[cfg(not(windows))]
+fn worker(
+    scope: String,
+    mut input: mpsc::Receiver<(u64, Vec<u8>)>,
+    output: mpsc::Sender<(u64, Packet)>,
+    policy: Arc<Mutex<(u64, bool, Capabilities)>>,
+    ready: Arc<AtomicBool>,
+    stop: CancellationToken,
+    updates: notices::Journal,
+) -> Result<()> {
+    let mut local = Local::new(scope.clone())?;
+    let result = (|| -> Result<()> {
+        while !stop.is_cancelled() {
+            let mut packets = Vec::new();
+            match input.try_recv() {
+                Ok(p) => packets.push(p),
+                Err(mpsc::error::TryRecvError::Disconnected) => break,
+                Err(_) => std::thread::sleep(Duration::from_millis(5)),
+            }
+            for _ in 0..3 {
+                match input.try_recv() {
+                    Ok(p) => packets.push(p),
+                    Err(_) => break,
+                }
+            }
+            let (revision, requested, capabilities) = *super::super::lock(&policy);
+            let packets = packets
+                .into_iter()
+                .filter(|(g, _)| *g == revision)
+                .map(|(_, p)| p)
+                .collect();
+            // A `Local` engine is always constructible, so the backend is ready
+            // as soon as the worker is running.
+            ready.store(true, Ordering::Release);
+            // `Local::exchange` creates/retires the engine from `enabled`/`revision`
+            // and drains its responses, exactly as the Windows ordinary-user path.
+            let reply = local.exchange(Request {
+                capabilities: Some(capabilities),
+                revision,
+                scope: scope.clone(),
+                enabled: requested,
+                packets,
+                close: false,
+            })?;
+            for notice in reply.notices {
+                updates.publish(notice);
+            }
+            for packet in reply.packets {
+                let mut packet = (revision, packet);
+                loop {
+                    if stop.is_cancelled() {
+                        return Ok(());
+                    }
+                    match output.try_send(packet) {
+                        Ok(()) => break,
+                        Err(mpsc::error::TrySendError::Full(p)) => {
+                            packet = p;
+                            std::thread::sleep(Duration::from_millis(1));
+                        }
+                        Err(_) => return Ok(()),
+                    }
+                }
+            }
+        }
+        Ok(())
+    })();
+    if let Some(engine) = local.engine.take() {
+        local.runtime.block_on(engine.close());
+    }
+    for notice in local.journal.take() {
+        updates.publish(notice);
+    }
+    drop(local);
+    if stop.is_cancelled() { Ok(()) } else { result }
 }
