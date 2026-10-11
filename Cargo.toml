@@ -154,6 +154,12 @@ fuser = { version = "0.15", default-features = false }
 x11rb = "0.13"
 pollster = "0.4"
 display-info = "0.5.9"
+# Linux host (controlled side): wlroots screencopy capture, virtual input.
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", default-features = false, features = ["client", "unstable"] }
+wayland-protocols-wlr = { version = "0.3", default-features = false, features = ["client"] }
+wayland-protocols-misc = { version = "0.3", default-features = false, features = ["client"] }
+memmap2 = "0.9"
 
 [patch.crates-io]
 dtls = { path = "vendor/dtls" }

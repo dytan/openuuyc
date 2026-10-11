@@ -1,40 +1,39 @@
-//! Linux stub: this host-side module is Windows-only (generated from upstream signatures).
-
-#![allow(dead_code, unused_variables, unused_imports, clippy::all)]
-
+//! Linux input backend: always the local uinput engine. There is no privileged
+//! input service (that is the Windows session-0 broker), so `require_service`
+//! requests are refused rather than silently downgraded.
 use super::{
-    broker::Remote,
     engine::{Engine, Geometry},
     wire::Event,
 };
+use anyhow::{Result, bail};
 
-use anyhow::Result;
-
-pub(super) struct Native {
-    _never: std::convert::Infallible,
-}
-
-pub(super) enum Backend {
-    Local(Native),
-    Service(Remote),
+pub(super) struct Backend {
+    engine: Engine,
+    healthy: bool,
 }
 
 impl Backend {
     pub fn new(
         policy: super::wire::Policy,
         require_service: bool,
-        permitted: impl Fn() -> bool,
+        _permitted: impl Fn() -> bool,
     ) -> Result<Self> {
-        crate::platform::linux::unsupported()
+        if require_service {
+            bail!("Linux 被控没有特权输入服务");
+        }
+        Ok(Self {
+            engine: Engine::new(false, policy, 0, false)?,
+            healthy: true,
+        })
     }
     pub fn service(&self) -> bool {
         false
     }
     pub fn healthy(&self) -> bool {
-        false
+        self.healthy
     }
     pub fn backend(&self) -> &str {
-        ""
+        self.engine.backend()
     }
     pub fn apply(
         &mut self,
@@ -42,21 +41,30 @@ impl Backend {
         geometry: Geometry,
         permitted: impl Fn() -> bool,
     ) -> Result<()> {
-        crate::platform::linux::unsupported()
+        for event in events {
+            if !permitted() {
+                break;
+            }
+            if let Err(error) = self.engine.apply(event, geometry.clone(), &permitted) {
+                self.healthy = false;
+                return Err(error);
+            }
+        }
+        Ok(())
     }
     pub fn release(&mut self) -> Result<()> {
-        crate::platform::linux::unsupported()
+        self.engine.release()
     }
     pub fn synchronize(&mut self, geometry: Geometry) -> Result<()> {
-        crate::platform::linux::unsupported()
+        self.engine.synchronize(geometry)
     }
     pub fn configure(&mut self, configuration: super::config::Configuration) -> Result<()> {
-        crate::platform::linux::unsupported()
+        self.engine.configure(configuration)
     }
     pub fn mouse_policy(&self) -> super::config::MousePolicy {
-        unreachable!("Windows host only")
+        self.engine.mouse_policy()
     }
     pub fn tick(&mut self) -> Result<()> {
-        crate::platform::linux::unsupported()
+        self.engine.tick()
     }
 }

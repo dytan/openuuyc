@@ -1,4 +1,5 @@
-//! Linux stub: this host-side module is Windows-only (generated from upstream signatures).
+//! Linux host microphone: no virtual capture device yet, so remote microphone
+//! audio is accepted on the wire and dropped.
 
 #![allow(dead_code, unused_variables, unused_imports, clippy::all)]
 
@@ -44,12 +45,16 @@ pub(crate) fn error_code(error: &anyhow::Error) -> i32 {
         0
     }
 
+/// Remote microphone playback needs a virtual capture device on the host;
+/// Linux keeps the channel alive but reports it as unavailable.
+#[derive(Clone)]
 pub(crate) struct Receiver {
-    _never: std::convert::Infallible,
+    status: tokio::sync::watch::Receiver<Status>,
 }
 
 pub(crate) struct Session {
-    _never: std::convert::Infallible,
+    _status: tokio::sync::watch::Sender<Status>,
+    receiver: Receiver,
 }
 
 impl Session {
@@ -58,20 +63,27 @@ impl Session {
         cancel: CancellationToken,
         connected: Arc<AtomicBool>,
     ) -> Result<Self> {
-        crate::platform::linux::unsupported()
+        let (tx, rx) = tokio::sync::watch::channel(Status::default());
+        Ok(Self {
+            _status: tx,
+            receiver: Receiver { status: rx },
+        })
     }
     pub fn receiver(&self) -> Receiver {
-        unreachable!("Windows host only")
+        self.receiver.clone()
     }
     pub fn close(&mut self) {}
 }
 
 impl Receiver {
     pub async fn policy(&self, enabled: bool) -> Result<()> {
-        crate::platform::linux::unsupported()
+        if enabled {
+            anyhow::bail!("Linux 被控暂不支持远端麦克风")
+        }
+        Ok(())
     }
     pub fn status(&self) -> tokio::sync::watch::Receiver<Status> {
-        unreachable!("Windows host only")
+        self.status.clone()
     }
     pub fn transport_lost(&self) {}
     pub fn select_source(&self) -> u64 {

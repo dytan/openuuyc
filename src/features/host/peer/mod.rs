@@ -1184,6 +1184,7 @@ fn video_timestamp(origin: u32, elapsed_100ns: u64) -> u32 {
     origin.wrapping_add((u128::from(elapsed_100ns) * 9 / 1000) as u32)
 }
 
+#[cfg_attr(target_os = "linux", path = "capture_worker_linux.rs")]
 mod capture_worker;
 mod channels;
 mod cursor;

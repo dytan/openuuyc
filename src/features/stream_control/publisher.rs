@@ -6,9 +6,7 @@ use crate::features::host::capture::Screen;
 use anyhow::Context as _;
 
 // Host-side screen/session publishing; Linux never hosts.
-#[cfg(windows)]
 mod displays;
-#[cfg(windows)]
 pub(crate) use displays::{receive_session, screen_states};
 
 pub(crate) struct DrawRequest {

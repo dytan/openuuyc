@@ -40,7 +40,6 @@ const RECONNECT_KEY_CHECK_INTERVAL: Duration = Duration::from_secs(30);
 const RECONNECT_KEY_MAX_AGE: Duration = Duration::from_secs(300);
 const RECONNECT_KEY_ACK_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_SDP_BYTES: u64 = 1024 * 1024;
-#[cfg_attr(not(windows), path = "host_linux.rs")]
 pub(crate) mod host;
 mod tls;
 mod transport;

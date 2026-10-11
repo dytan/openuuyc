@@ -101,6 +101,10 @@ enum Commands {
 
     #[command(hide = true)]
     PluginHost { manifest: PathBuf },
+    /// Linux 被控自检：采集→编码→解码→uinput（无需对端）
+    #[cfg(target_os = "linux")]
+    #[command(hide = true)]
+    HostSelftest,
     /// 打开完整图形设备中心
     Gui {
         #[arg(long)]
@@ -296,6 +300,8 @@ fn main() -> Result<()> {
         }
 
         Commands::PluginHost { manifest } => openuuyc::plugins::host(&manifest),
+        #[cfg(target_os = "linux")]
+        Commands::HostSelftest => openuuyc::application::host_selftest(),
         Commands::Gui {
             background,
             fps,

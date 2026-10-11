@@ -56,7 +56,19 @@ pub(crate) fn local_display_dimensions() -> Vec<(u32, u32)> {
     modes
 }
 
-/// Windows display source ids are a host-only concept.
+/// Stable per-process protocol screen ids, keyed by output identity.
 pub(crate) fn source_id(identity: &str) -> Result<i32> {
-    crate::platform::linux::unsupported()
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static IDS: OnceLock<Mutex<HashMap<String, i32>>> = OnceLock::new();
+    let mut ids = IDS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if let Some(id) = ids.get(identity) {
+        return Ok(*id);
+    }
+    let id = i32::try_from(ids.len()).context("显示器标识已耗尽")?;
+    ids.insert(identity.to_owned(), id);
+    Ok(id)
 }

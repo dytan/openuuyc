@@ -19,6 +19,7 @@ pub(crate) mod display_hdr;
 pub(crate) mod drag_drop;
 pub(crate) mod encoder;
 pub(crate) mod file_locations;
+pub(crate) mod host;
 pub(crate) mod host_service;
 pub(crate) mod input;
 pub(crate) mod loopback;

@@ -83,6 +83,13 @@ pub fn component_operation(
 ) -> anyhow::Result<bool> {
     crate::platform::windows::components::execute(kind, operation, allow_sas, owner, removal)
 }
+#[cfg(target_os = "linux")]
+pub fn host_selftest() -> anyhow::Result<()> {
+    let report = crate::platform::linux::host::selftest::run()?;
+    println!("{report}");
+    Ok(())
+}
+
 pub fn purge_machine_data() -> anyhow::Result<()> {
     crate::platform::windows::components::application::purge_machine_data()
 }
