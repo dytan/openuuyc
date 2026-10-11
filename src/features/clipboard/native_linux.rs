@@ -6,8 +6,10 @@
 //! * There is no clipboard-change notification, so local changes are polled.
 //! * Files copied here are offered to the remote: it pulls the descriptor list
 //!   and then the contents by offset, so nothing has to be promised in advance.
-//!   The reverse direction still cannot be served, because a local paste needs
-//!   real paths on this machine before the pasting application asks for them.
+//!   Local file copies (text/uri-list, gnome-copied-files, kde-cutselection) are
+//!   advertised to the remote as FileGroupDescriptorW/FileContents so a Mac
+//!   paste can pull them. Incoming remote files still need real local paths
+//!   (FUSE mount or Downloads drop) before a paste into a local app.
 use super::formats::{self, Format};
 use super::*;
 use anyhow::Context as _;
@@ -1068,13 +1070,8 @@ fn write_image(state: &mut State, dib: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// Strip the line ending a `text/uri-list` entry carries into the path.
-///
-/// RFC 2483 delimits that format with CRLF, which is what GNOME and every other
-/// file manager here writes, but the parser these paths come from splits on the
-/// line feed alone and leaves the carriage return on the end of the name. The
-/// path then resolves to nothing and the copy looks empty.
-fn trim_uri_path(path: PathBuf) -> PathBuf {
+/// Strip trailing CR/LF that RFC 2483 uri-list entries often leave behind.
+fn trim_crlf(path: PathBuf) -> PathBuf {
     use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
     let bytes = path.as_os_str().as_bytes();
     let trimmed = bytes
@@ -1087,7 +1084,149 @@ fn trim_uri_path(path: PathBuf) -> PathBuf {
     PathBuf::from(std::ffi::OsString::from_vec(bytes[..trimmed].to_vec()))
 }
 
-/// Read the local clipboard and, when it changed, announce the new formats.
+/// Decode one `file://` (or bare absolute) URI line into a local path.
+/// Percent-decodes, strips CR/LF, rejects non-local / non-file schemes.
+fn uri_line_to_path(line: &str) -> Option<PathBuf> {
+    let line = line.trim().trim_end_matches(['\r', '\n']);
+    if line.is_empty() || line.starts_with('#') {
+        return None;
+    }
+    let path = if let Some(rest) = line.strip_prefix("file://") {
+        // file://localhost/path or file:///path or file://host/path (reject remote hosts)
+        let rest = percent_decode_path(rest);
+        if let Some(after_host) = rest.strip_prefix("localhost") {
+            after_host.to_string()
+        } else if rest.starts_with('/') {
+            rest
+        } else {
+            // file://hostname/... — not a local path we can serve
+            return None;
+        }
+    } else if line.starts_with('/') {
+        line.to_string()
+    } else {
+        return None;
+    };
+    let path = PathBuf::from(path);
+    path.is_absolute().then_some(path)
+}
+
+/// Minimal percent-decoder for uri-list paths (UTF-8). Invalid escapes are kept.
+fn percent_decode_path(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(h), Some(l)) = (from_hex(bytes[i + 1]), from_hex(bytes[i + 2])) {
+                out.push((h << 4) | l);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn from_hex(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Parse RFC 2483 `text/uri-list` bytes into absolute local paths.
+fn parse_uri_list(bytes: &[u8]) -> Vec<PathBuf> {
+    let text = String::from_utf8_lossy(bytes);
+    text.lines()
+        .filter_map(uri_line_to_path)
+        .map(trim_crlf)
+        .collect()
+}
+
+/// GNOME `x-special/gnome-copied-files`: first line is `copy`/`cut`, rest are URIs.
+fn parse_gnome_copied_files(bytes: &[u8]) -> Vec<PathBuf> {
+    let text = String::from_utf8_lossy(bytes);
+    let mut lines = text.lines();
+    let Some(action) = lines.next() else {
+        return Vec::new();
+    };
+    if !matches!(action.trim(), "copy" | "cut") {
+        // Some producers omit the action line; treat the whole blob as uri-list.
+        return parse_uri_list(bytes);
+    }
+    lines.filter_map(uri_line_to_path).map(trim_crlf).collect()
+}
+
+/// KDE `application/x-kde-cutselection` / similar: often `0`/`1` then uri-list, or
+/// just a uri-list. Accept either.
+fn parse_kde_files(bytes: &[u8]) -> Vec<PathBuf> {
+    let text = String::from_utf8_lossy(bytes);
+    let mut lines = text.lines();
+    let Some(first) = lines.next() else {
+        return Vec::new();
+    };
+    if matches!(first.trim(), "0" | "1") {
+        return lines.filter_map(uri_line_to_path).map(trim_crlf).collect();
+    }
+    parse_uri_list(bytes)
+}
+
+/// Fallback when arboard cannot see file offers (GNOME/KDE often publish
+/// `x-special/gnome-copied-files` / `application/x-kde-cutselection` without a
+/// simultaneous `text/uri-list` that arboard's Wayland backend reads).
+fn wl_paste_files() -> Vec<PathBuf> {
+    const MIMES: &[&str] = &[
+        "text/uri-list",
+        "x-special/gnome-copied-files",
+        "application/x-kde-cutselection",
+        "text/x-moz-url",
+    ];
+    for mime in MIMES {
+        let Ok(output) = std::process::Command::new("wl-paste")
+            .args(["--no-newline", "--type", mime])
+            .output()
+        else {
+            continue;
+        };
+        if !output.status.success() || output.stdout.is_empty() {
+            continue;
+        }
+        let paths = match *mime {
+            "x-special/gnome-copied-files" => parse_gnome_copied_files(&output.stdout),
+            "application/x-kde-cutselection" => parse_kde_files(&output.stdout),
+            _ => parse_uri_list(&output.stdout),
+        };
+        if !paths.is_empty() {
+            tracing::info!(mime, count = paths.len(), "wl-paste 读到本地文件剪贴板");
+            return paths;
+        }
+    }
+    Vec::new()
+}
+
+/// Local file paths currently on the clipboard, preferring arboard then wl-paste.
+fn read_local_files(clipboard: &mut arboard::Clipboard) -> Vec<PathBuf> {
+    let from_arboard = clipboard
+        .get()
+        .file_list()
+        .unwrap_or_default()
+        .into_iter()
+        .map(trim_crlf)
+        .filter(|path| path.is_absolute())
+        .collect::<Vec<_>>();
+    if !from_arboard.is_empty() {
+        return from_arboard;
+    }
+    wl_paste_files()
+        .into_iter()
+        .filter(|path| path.is_absolute())
+        .collect()
+}
 
 fn is_image_path(path: &Path) -> bool {
     path.extension()
@@ -1190,15 +1329,11 @@ fn poll_local(state: &mut State) -> Result<()> {
             held = state.local.sources.len(),
             "剪贴板轮询");
     }
-    // A file manager puts the paths on the clipboard as `text/uri-list` and a
-    // plain-text copy of the same names, so files are looked for first.
-    let sources = clipboard
-        .get()
-        .file_list()
-        .unwrap_or_default()
+    // File managers put paths on text/uri-list and/or DE-specific MIME types
+    // (x-special/gnome-copied-files, application/x-kde-cutselection). arboard
+    // only reads uri-list; wl-paste covers the rest.
+    let sources = read_local_files(clipboard)
         .into_iter()
-        .map(trim_uri_path)
-        .filter(|path| path.is_absolute())
         // A copy the remote sent is published as paths into this process's own
         // filesystem. Offering those back would ask the remote for the files it
         // just gave us, over and over.
@@ -1679,5 +1814,42 @@ mod file_serve_tests {
             "oversize request rejected"
         );
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn parse_uri_list_percent_decode_and_multiple() {
+        let raw = b"file:///tmp/hello%20world.txt\r\nfile:///tmp/dir%2Fsub\n# comment\nfile://localhost/tmp/z\nhttp://example.com/x\n/tmp/bare\n";
+        let paths = parse_uri_list(raw);
+        let as_str: Vec<_> = paths.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+        assert!(as_str.contains(&"/tmp/hello world.txt".into()), "{as_str:?}");
+        assert!(as_str.contains(&"/tmp/dir/sub".into()), "{as_str:?}");
+        assert!(as_str.contains(&"/tmp/z".into()), "{as_str:?}");
+        assert!(as_str.contains(&"/tmp/bare".into()), "{as_str:?}");
+        assert!(!as_str.iter().any(|s| s.contains("example.com")), "{as_str:?}");
+        // No leftover CR on any path.
+        assert!(as_str.iter().all(|s| !s.contains('\r')), "{as_str:?}");
+    }
+
+    #[test]
+    fn parse_gnome_copied_files_copy_and_cut() {
+        let raw = b"copy\nfile:///tmp/a.txt\nfile:///tmp/b%20c.txt\n";
+        let paths = parse_gnome_copied_files(raw);
+        assert_eq!(
+            paths,
+            vec![PathBuf::from("/tmp/a.txt"), PathBuf::from("/tmp/b c.txt")]
+        );
+        let cut = b"cut\nfile:///tmp/only.txt\n";
+        assert_eq!(
+            parse_gnome_copied_files(cut),
+            vec![PathBuf::from("/tmp/only.txt")]
+        );
+    }
+
+    #[test]
+    fn parse_kde_files_with_and_without_flag() {
+        let with = b"1\nfile:///tmp/k.txt\n";
+        assert_eq!(parse_kde_files(with), vec![PathBuf::from("/tmp/k.txt")]);
+        let plain = b"file:///tmp/k2.txt\r\n";
+        assert_eq!(parse_kde_files(plain), vec![PathBuf::from("/tmp/k2.txt")]);
     }
 }

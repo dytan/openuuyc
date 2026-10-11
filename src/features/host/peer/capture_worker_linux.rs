@@ -57,6 +57,13 @@ pub(super) fn capture_loop(
     let mut frame_metadata = std::collections::BTreeMap::new();
     let mut last_diagnostics = None;
     let mut metrics = metrics::Metrics::default();
+    // GPU VPP scale+CSC path (full-res capture -> encode_scaled). Default off:
+    // shm grab of the native frame is still ~20 ms, so this is not faster until
+    // dmabuf capture lands. OPENUUYC_ZEROCOPY=1 enables it with auto-fallback.
+    let mut zerocopy = std::env::var_os("OPENUUYC_ZEROCOPY").is_some_and(|v| v != "0");
+    if zerocopy {
+        tracing::info!("OPENUUYC_ZEROCOPY 已启用（GPU VPP 缩放，失败自动回退）");
+    }
     // Publish the pointer over the cursor channel independently of video,
     // like the Windows host. While this sampler is alive the capture path
     // excludes the cursor from the frame (host::pointer::available()).
@@ -456,12 +463,56 @@ pub(super) fn capture_loop(
             while frame_metadata.len() > 2048 {
                 frame_metadata.pop_first();
             }
-            let encoded = active_encoder.encode_cancellable(
-                &frame.texture,
-                timestamp,
-                force,
-                &encode_cancel,
-            );
+            let encoded = if zerocopy && active_encoder.vpp_available() {
+                // Full-res grab + GPU VPP scale into the encoder's configured size.
+                match desktop.as_mut().context("缺少采集源")?.next_full(wait_ms) {
+                    Ok(Some((bgra, sw, sh, _grab, _norm))) => {
+                        match active_encoder.encode_scaled(
+                            &bgra,
+                            sw,
+                            sh,
+                            sw as usize * 4,
+                            timestamp,
+                            force,
+                        ) {
+                            Ok(packets) => Ok(packets),
+                            Err(error) => {
+                                tracing::warn!(%error, "ZEROCOPY VPP 编码失败，回退 CPU 缩放路径");
+                                zerocopy = false;
+                                active_encoder.encode_cancellable(
+                                    &frame.texture,
+                                    timestamp,
+                                    force,
+                                    &encode_cancel,
+                                )
+                            }
+                        }
+                    }
+                    Ok(None) => active_encoder.encode_cancellable(
+                        &frame.texture,
+                        timestamp,
+                        force,
+                        &encode_cancel,
+                    ),
+                    Err(error) => {
+                        tracing::warn!(%error, "ZEROCOPY 全分辨率采集失败，回退");
+                        zerocopy = false;
+                        active_encoder.encode_cancellable(
+                            &frame.texture,
+                            timestamp,
+                            force,
+                            &encode_cancel,
+                        )
+                    }
+                }
+            } else {
+                active_encoder.encode_cancellable(
+                    &frame.texture,
+                    timestamp,
+                    force,
+                    &encode_cancel,
+                )
+            };
             metrics.encode.record(encode_started.elapsed());
             let encoded = encoded?;
             for output in &encoded {

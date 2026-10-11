@@ -298,6 +298,19 @@ pub fn run(bench: Option<u32>) -> Result<String> {
                     let mut vp_bytes = 0usize;
                     let mut vp_units: Vec<Vec<u8>> = Vec::new();
                     let mut vp_frames = 0u32;
+                    let mut va = match crate::platform::linux::encoder::Encoder::hardware_format(
+                        &(),
+                        (frame.width, frame.height),
+                        Format::AVC,
+                        rate,
+                        crate::features::host::format::Color::Sdr,
+                    ) {
+                        Ok(enc) => enc,
+                        Err(e) => {
+                            line!("  无法重建 VPP 编码器：{e:#}");
+                            va
+                        }
+                    };
                     let started = Instant::now();
                     for i in 0..frames {
                         let Some((bgra, sw_w, sw_h, grab, norm)) =

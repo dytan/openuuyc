@@ -49,8 +49,12 @@ pub(super) struct Encoder {
     vpp: Option<cros_libva::VppContext>,
     src_surface: Option<Surface<()>>,
     src_dims: (u32, u32),
-    // Two surfaces ping-ponged between "current" and "reference".
+    // Reconstructed/reference surfaces (CurrPic / RefPicList). Separate from
+    // the input surface so a VPP write into the input is not clobbered when the
+    // driver uses CurrPic as the reconstruction target.
     surfaces: [Option<Surface<()>>; 2],
+    /// Raw NV12 input for vaBeginPicture (CPU upload or VPP output).
+    input_surface: Option<Surface<()>>,
     coded: EncCodedBuffer,
     width: u32,
     height: u32,
@@ -149,16 +153,31 @@ impl Encoder {
         let aligned_w = u32::from(mb_w) * 16;
         let aligned_h = u32::from(mb_h) * 16;
 
+        // Recon/ref pool: ENCODER only, registered with the encode context.
         let surfaces = display
             .create_surfaces::<()>(
                 VA_RT_FORMAT_YUV420,
                 Some(FOURCC_NV12),
                 aligned_w,
                 aligned_h,
-                Some(UsageHint::USAGE_HINT_ENCODER | UsageHint::USAGE_HINT_VPP_WRITE),
+                Some(UsageHint::USAGE_HINT_ENCODER),
                 vec![(), ()],
             )
             .map_err(|e| anyhow::anyhow!("创建 VA-API 编码表面失败: {e}"))?;
+
+        // Input surface: ENCODER|VPP_WRITE so VPP can write NV12 into it and the
+        // encoder can read it via vaBeginPicture. Kept OUT of the context's
+        // render-target list (recon surfaces only) — matching ffmpeg's split.
+        let mut input_surfaces = display
+            .create_surfaces::<()>(
+                VA_RT_FORMAT_YUV420,
+                Some(FOURCC_NV12),
+                aligned_w,
+                aligned_h,
+                Some(UsageHint::USAGE_HINT_ENCODER | UsageHint::USAGE_HINT_VPP_WRITE),
+                vec![()],
+            )
+            .map_err(|e| anyhow::anyhow!("创建 VA-API 输入表面失败: {e}"))?;
 
         let context = display
             .create_context::<()>(&config, aligned_w, aligned_h, Some(&surfaces), true)
@@ -216,6 +235,7 @@ impl Encoder {
             _config: config,
             image_fmt,
             surfaces: [Some(s0), Some(s1)],
+            input_surface: input_surfaces.pop(),
             coded,
             width: size.0,
             height: size.1,
@@ -285,28 +305,17 @@ impl Encoder {
             "采集帧尺寸与 VA-API 编码器不一致"
         );
 
-        // Take the current surface slot and upload NV12 into it.
-        let surface = self.surfaces[self.slot]
+        // Upload into the dedicated input surface; recon lives in surfaces[slot].
+        let input = self
+            .input_surface
             .take()
-            .context("VA-API 编码表面缺失")?;
-        let curr_surface_id = surface.id();
-        self.upload_nv12(&surface, bgra, pitch)?;
-        if std::env::var_os("OPENUUYC_CPU_DUMP_NV12").is_some()
-            && !VPP_NV12_DUMPED.swap(true, std::sync::atomic::Ordering::Relaxed)
-        {
-            if let Ok(img) = Image::create_from(&surface, self.image_fmt, (self.aligned_w, self.aligned_h), (self.width, self.height)) {
-                let va = *img.image();
-                let buf = img.as_ref();
-                let (w, h) = (self.width as usize, self.height as usize);
-                let (py, pc, oy, oc) = (va.pitches[0] as usize, va.pitches[1] as usize, va.offsets[0] as usize, va.offsets[1] as usize);
-                let mut out = Vec::with_capacity(w*h*3/2);
-                for y in 0..h { out.extend_from_slice(&buf[oy+y*py..oy+y*py+w]); }
-                for y in 0..h/2 { out.extend_from_slice(&buf[oc+y*pc..oc+y*pc+w]); }
-                let _ = std::fs::write("/tmp/cpu_dst.nv12", &out);
-                eprintln!("CPU dst dumped {w}x{h} nv12 pitchY={py}");
-            }
-        }
-        self.finish_encode(surface, curr_surface_id, force)
+            .context("VA-API 输入表面缺失")?;
+        self.upload_nv12(&input, bgra, pitch)?;
+        let recon_id = self.surfaces[self.slot]
+            .as_ref()
+            .context("VA-API 重建表面缺失")?
+            .id();
+        self.finish_encode(input, recon_id, force)
     }
 
     /// VA-API VPP path: upload full-res BGRA into an RGB surface, then let the
@@ -337,20 +346,26 @@ impl Encoder {
         let src_surface = self.src_surface.as_ref().context("VPP 源表面缺失")?;
         let src_id = src_surface.id();
 
-        let surface = self.surfaces[self.slot]
+        let input = self
+            .input_surface
             .take()
-            .context("VA-API 编码表面缺失")?;
-        let curr_surface_id = surface.id();
+            .context("VA-API 输入表面缺失")?;
+        let input_id = input.id();
         self.vpp
             .as_ref()
             .unwrap()
-            .blit(src_id, (src_w, src_h), curr_surface_id, (self.width, self.height))
+            .blit(src_id, (src_w, src_h), input_id, (self.width, self.height))
             .map_err(|e| anyhow::anyhow!("VA-API VPP 处理失败: {e}"))?;
+        // VPP already vaSyncSurface(dst); one more sync before BeginPicture so
+        // the encoder sees a settled input (required on iHD after VPP write).
+        input
+            .sync()
+            .map_err(|e| anyhow::anyhow!("同步 VPP 输入表面失败: {e}"))?;
         if std::env::var_os("OPENUUYC_VPP_DUMP_NV12").is_some()
             && !VPP_NV12_DUMPED.swap(true, std::sync::atomic::Ordering::Relaxed)
         {
             match Image::create_from(
-                &surface,
+                &input,
                 self.image_fmt,
                 (self.aligned_w, self.aligned_h),
                 (self.width, self.height),
@@ -364,33 +379,54 @@ impl Encoder {
                     let oy = va.offsets[0] as usize;
                     let oc = va.offsets[1] as usize;
                     let mut out = Vec::with_capacity(w * h * 3 / 2);
-                    for y in 0..h { out.extend_from_slice(&buf[oy + y * py..oy + y * py + w]); }
-                    for y in 0..h / 2 { out.extend_from_slice(&buf[oc + y * pc..oc + y * pc + w]); }
+                    for y in 0..h {
+                        out.extend_from_slice(&buf[oy + y * py..oy + y * py + w]);
+                    }
+                    for y in 0..h / 2 {
+                        out.extend_from_slice(&buf[oc + y * pc..oc + y * pc + w]);
+                    }
                     let _ = std::fs::write("/tmp/vpp_dst.nv12", &out);
                     eprintln!("VPP dst dumped {w}x{h} nv12 pitchY={py} ({} bytes)", out.len());
                 }
                 Err(e) => eprintln!("VPP dst dump create_from 失败: {e}"),
             }
         }
-        if std::env::var_os("OPENUUYC_VPP_SAMPLE").is_some() && self.frame_count == 0 {
-            if let Ok(img) = Image::create_from(
-                &surface,
+        let recon_id = self.surfaces[self.slot]
+            .as_ref()
+            .context("VA-API 重建表面缺失")?
+            .id();
+        // Prefer direct BeginPicture(VPP output) + CurrPic(recon). The plane-copy
+        // bridge (GetImage/PutImage) is a fallback for drivers that don't accept
+        // a VPP-written surface as encode input — enable with OPENUUYC_VPP_BRIDGE=1.
+        if std::env::var_os("OPENUUYC_VPP_BRIDGE").is_some() {
+            let recon = self.surfaces[self.slot]
+                .take()
+                .context("VA-API 重建表面缺失")?;
+            let img = Image::create_from(
+                &input,
                 self.image_fmt,
                 (self.aligned_w, self.aligned_h),
                 (self.width, self.height),
-            ) {
-                let va = *img.image();
-                let y = &img.as_ref()[va.offsets[0] as usize..];
-                let n = (self.width as usize * 4).min(y.len());
-                let sample = &y[..n];
-                let mean = sample.iter().map(|&b| b as u32).sum::<u32>()
-                    / sample.len().max(1) as u32;
-                let min = sample.iter().copied().min().unwrap_or(0);
-                let max = sample.iter().copied().max().unwrap_or(0);
-                eprintln!("VPP dst Y mean={mean} min={min} max={max}");
-            }
+            )
+            .map_err(|e| anyhow::anyhow!("VPP GetImage 失败: {e}"))?;
+            let va = *img.image();
+            let buf = img.as_ref();
+            self.upload_nv12_planes(
+                &recon,
+                &buf[va.offsets[0] as usize..],
+                va.pitches[0] as usize,
+                &buf[va.offsets[1] as usize..],
+                va.pitches[1] as usize,
+            )?;
+            drop(img);
+            let rid = recon.id();
+            recon
+                .sync()
+                .map_err(|e| anyhow::anyhow!("同步 VPP→编码表面失败: {e}"))?;
+            self.input_surface = Some(input);
+            return self.finish_encode_same(recon, rid, force);
         }
-        self.finish_encode(surface, curr_surface_id, force)
+        self.finish_encode(input, recon_id, force)
     }
 
     pub(super) fn vpp_available(&self) -> bool {
@@ -454,9 +490,28 @@ impl Encoder {
 
     fn finish_encode(
         &mut self,
-        surface: Surface<()>,
-        curr_surface_id: VASurfaceID,
+        input: Surface<()>,
+        recon_id: VASurfaceID,
         force: bool,
+    ) -> Result<Vec<Packet>> {
+        self.finish_encode_ex(input, recon_id, force, false)
+    }
+
+    fn finish_encode_same(
+        &mut self,
+        surface: Surface<()>,
+        surface_id: VASurfaceID,
+        force: bool,
+    ) -> Result<Vec<Packet>> {
+        self.finish_encode_ex(surface, surface_id, force, true)
+    }
+
+    fn finish_encode_ex(
+        &mut self,
+        input: Surface<()>,
+        recon_id: VASurfaceID,
+        force: bool,
+        return_to_slot: bool,
     ) -> Result<Vec<Packet>> {
         let is_idr = force || !self.have_ref || self.frame_count % self.gop == 0;
 
@@ -504,10 +559,12 @@ impl Encoder {
         };
 
         let buffers =
-            self.build_frame_buffers(curr_surface_id, is_idr, slice_type, frame_num, poc, reset_rc, eff_fps)?;
+            self.build_frame_buffers(recon_id, is_idr, slice_type, frame_num, poc, reset_rc, eff_fps)?;
 
         // Render.
-        let mut picture = Picture::new(self.frame_count as u64, Rc::clone(&self.context), surface);
+        // BeginPicture(input); CurrPic(recon) — ffmpeg's split. Sharing one
+        // surface for both left VPP-fed frames mid-gray on iHD.
+        let mut picture = Picture::new(self.frame_count as u64, Rc::clone(&self.context), input);
         for buf in buffers {
             picture.add_buffer(buf);
         }
@@ -531,11 +588,14 @@ impl Encoder {
         }
         ensure!(!bitstream.is_empty(), "VA-API 输出空码流");
 
-        // Return the surface to its slot; it is now the reference.
-        let surface = picture
+        let returned = picture
             .take_surface()
-            .map_err(|_| anyhow::anyhow!("无法回收 VA-API 编码表面"))?;
-        self.surfaces[self.slot] = Some(surface);
+            .map_err(|_| anyhow::anyhow!("无法回收 VA-API 表面"))?;
+        if return_to_slot {
+            self.surfaces[self.slot] = Some(returned);
+        } else {
+            self.input_surface = Some(returned);
+        }
 
         // Detect once whether the driver already emits SPS/PPS.
         if self.driver_inserts_headers.is_none() && is_idr {
@@ -550,7 +610,7 @@ impl Encoder {
         data.extend_from_slice(&bitstream);
 
         // Advance reference/frame state for the next frame.
-        self.ref_surface_id = curr_surface_id;
+        self.ref_surface_id = recon_id;
         self.ref_frame_idx = u32::from(frame_num);
         self.ref_poc = poc;
         self.have_ref = true;
@@ -780,7 +840,63 @@ impl Encoder {
         out
     }
 
-    fn upload_nv12(&mut self, surface: &Surface<()>, bgra: &[u8], pitch: usize) -> Result<()> {
+    /// Upload already-converted NV12 planes into `surface` using the same
+    /// create_from(aligned,aligned) PutImage path as the working CPU encoder.
+    fn upload_nv12_planes(
+        &mut self,
+        surface: &Surface<()>,
+        y_plane: &[u8],
+        y_pitch: usize,
+        c_plane: &[u8],
+        c_pitch: usize,
+    ) -> Result<()> {
+        let mut image = Image::create_from(
+            surface,
+            self.image_fmt,
+            (self.aligned_w, self.aligned_h),
+            (self.aligned_w, self.aligned_h),
+        )
+        .map_err(|e| anyhow::anyhow!("创建 NV12 平面上传图像失败: {e}"))?;
+        let va = *image.image();
+        let off_y = va.offsets[0] as usize;
+        let off_c = va.offsets[1] as usize;
+        let pit_y = va.pitches[0] as usize;
+        let pit_c = va.pitches[1] as usize;
+        let (w, h) = (self.width as usize, self.height as usize);
+        let (aw, ah) = (self.aligned_w as usize, self.aligned_h as usize);
+        let dst = image.as_mut();
+        for y in 0..h {
+            let src = y * y_pitch;
+            let d = off_y + y * pit_y;
+            dst[d..d + w].copy_from_slice(&y_plane[src..src + w]);
+        }
+        for y in 0..h / 2 {
+            let src = y * c_pitch;
+            let d = off_c + y * pit_c;
+            dst[d..d + w].copy_from_slice(&c_plane[src..src + w]);
+        }
+        if ah > h {
+            let last = off_y + (h - 1) * pit_y;
+            self.nv12_pad.clear();
+            self.nv12_pad.extend_from_slice(&dst[last..last + w]);
+            let pad = self.nv12_pad.clone();
+            for y in h..ah {
+                let line = off_y + y * pit_y;
+                dst[line..line + w].copy_from_slice(&pad);
+            }
+            let last_c = off_c + (h / 2 - 1) * pit_c;
+            let padc: Vec<u8> = dst[last_c..last_c + w].to_vec();
+            for by in (h / 2)..(ah / 2) {
+                let line = off_c + by * pit_c;
+                dst[line..line + w].copy_from_slice(&padc);
+            }
+        }
+        let _ = aw;
+        drop(image);
+        Ok(())
+    }
+
+        fn upload_nv12(&mut self, surface: &Surface<()>, bgra: &[u8], pitch: usize) -> Result<()> {
         let mut image = Image::create_from(
             surface,
             self.image_fmt,
