@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use crate::platform::linux::capture::{self, Desktop};
 use crate::platform::linux::host::input;
 
-pub fn run() -> Result<String> {
+pub fn run(bench: Option<u32>) -> Result<String> {
     let mut report = String::new();
     macro_rules! line {
         ($($arg:tt)*) => {{ report.push_str(&format!($($arg)*)); report.push('\n'); }};
@@ -110,6 +110,83 @@ pub fn run() -> Result<String> {
         }
     } else {
         line!("uinput: /dev/uinput 不存在（加载 uinput 内核模块）");
+    }
+
+    // Optional steady-state benchmark: capture -> scale/convert -> encode,
+    // reporting per-stage p50/p95 and the achievable (CPU-bound) frame rate.
+    if let Some(frames) = bench {
+        let frames = frames.clamp(1, 100_000);
+        line!("");
+        line!("基准：{frames} 帧（采集→缩放→编码）");
+        let mut grab_ms = Vec::with_capacity(frames as usize);
+        let mut scale_ms = Vec::with_capacity(frames as usize);
+        let mut encode_ms = Vec::with_capacity(frames as usize);
+        let mut frame_ms = Vec::with_capacity(frames as usize);
+        let mut bytes_total = 0usize;
+        // Reuse one encoder sized to the capture output.
+        let mut bench_encoder = crate::platform::linux::encoder::Encoder::software_format(
+            &(),
+            (frame.width, frame.height),
+            Format::AVC,
+            rate,
+        )
+        .context("创建基准编码器失败")?;
+        let mut implementation = bench_encoder.implementation();
+        let bench_started = Instant::now();
+        let mut captured_frames = 0u32;
+        for i in 0..frames {
+            let loop_started = Instant::now();
+            let Some((f, grab, scale)) = desktop
+                .next_timed(100, 2, false, false, (1920, 1080))
+                .context("基准采集失败")?
+            else {
+                continue;
+            };
+            // A size change (first frame settles the real capture size) needs a
+            // fresh encoder; rebuild once then continue timing.
+            if (f.width, f.height) != (frame.width, frame.height) && i == 0 {
+                bench_encoder = crate::platform::linux::encoder::Encoder::software_format(
+                    &(), (f.width, f.height), Format::AVC, rate,
+                ).context("重建基准编码器失败")?;
+                implementation = bench_encoder.implementation();
+            }
+            let enc_started = Instant::now();
+            // Periodic IDR so we measure realistic steady-state P-frames too.
+            let force = i % 60 == 0;
+            let packets = bench_encoder
+                .encode(&f.texture, (i as i64) * 10_000, force)
+                .context("基准编码失败")?;
+            let enc = enc_started.elapsed();
+            bytes_total += packets.iter().map(|p| p.data.len()).sum::<usize>();
+            grab_ms.push(grab.as_secs_f64() * 1000.0);
+            scale_ms.push(scale.as_secs_f64() * 1000.0);
+            encode_ms.push(enc.as_secs_f64() * 1000.0);
+            frame_ms.push(loop_started.elapsed().as_secs_f64() * 1000.0);
+            captured_frames += 1;
+        }
+        let elapsed = bench_started.elapsed();
+        let pct = |v: &mut Vec<f64>, p: f64| -> f64 {
+            if v.is_empty() { return 0.0; }
+            v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let idx = ((v.len() as f64 - 1.0) * p).round() as usize;
+            v[idx.min(v.len() - 1)]
+        };
+        let mut g = grab_ms.clone();
+        let mut sc = scale_ms.clone();
+        let mut en = encode_ms.clone();
+        let mut fr = frame_ms.clone();
+        line!("  采集帧数: {captured_frames}  码流: {} KB  实现={implementation}", bytes_total / 1024);
+        line!("  screencopy 抓帧: p50 {:.1} ms  p95 {:.1} ms", pct(&mut g, 0.50), pct(&mut g, 0.95));
+        line!("  缩放/转换:      p50 {:.1} ms  p95 {:.1} ms", pct(&mut sc, 0.50), pct(&mut sc, 0.95));
+        line!("  编码:           p50 {:.1} ms  p95 {:.1} ms", pct(&mut en, 0.50), pct(&mut en, 0.95));
+        line!("  单帧串行合计:   p50 {:.1} ms  p95 {:.1} ms", pct(&mut fr, 0.50), pct(&mut fr, 0.95));
+        let fps = captured_frames as f64 / elapsed.as_secs_f64();
+        line!("  串行可达帧率:   {:.1} fps（{} 帧用时 {} ms）", fps, captured_frames, elapsed.as_millis());
+        let serial_p50 = pct(&mut frame_ms.clone(), 0.50);
+        if serial_p50 > 0.0 {
+            line!("  若采集/编码分线程并行，上限约 {:.1} fps",
+                1000.0 / pct(&mut grab_ms.clone(), 0.50).max(pct(&mut encode_ms.clone(), 0.50)).max(0.1));
+        }
     }
 
     line!("自检完成。真实被控仍需对端控制器连接测试。");

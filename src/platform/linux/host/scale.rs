@@ -36,6 +36,60 @@ pub(crate) fn convert(
         }
         return;
     }
+
+    // Fast path: exact integer downscale (e.g. 3456x2160 -> 1728x1080 is 2x).
+    // Box-average each kx*ky block in one cache-friendly pass and emit BGRA
+    // directly, avoiding the fixed-point bilinear setup and its random access.
+    if dw > 0 && dh > 0 && sw % dw == 0 && sh % dh == 0 {
+        let kx = sw / dw;
+        let ky = sh / dh;
+        // Cap the block so the row prefetch array is bounded; larger ratios
+        // (rare) fall through to the general bilinear path below.
+        if (1..=8).contains(&kx) && (1..=8).contains(&ky) {
+            // Channel order in the source: BGRX unless `rgb`, then RGBX. We
+            // always write B,G,R,255. For rgb input, read indices are swapped.
+            let (i_b, i_r) = if rgb { (2usize, 0usize) } else { (0usize, 2usize) };
+            let area = (kx * ky) as u32;
+            let half = area / 2;
+            // Divide by the block area; a power-of-two area (e.g. 2x2) uses a
+            // shift instead of a per-pixel integer division.
+            let shift = if area.is_power_of_two() { area.trailing_zeros() } else { 0 };
+            for y in 0..dh {
+                let out = &mut dst[y * dw * 4..(y + 1) * dw * 4];
+                // Pre-fetch the ky source rows for this destination row.
+                let mut rows: [&[u8]; 8] = [&[]; 8];
+                let use_rows = ky as usize;
+                for r in 0..use_rows {
+                    rows[r] = row(y * ky + r);
+                }
+                for x in 0..dw {
+                    let (mut sb, mut sg, mut sr) = (0u32, 0u32, 0u32);
+                    let base = (x * kx) as usize * 4;
+                    for r in rows.iter().take(use_rows) {
+                        let mut off = base;
+                        for _ in 0..kx {
+                            sb += u32::from(r[off + i_b]);
+                            sg += u32::from(r[off + 1]);
+                            sr += u32::from(r[off + i_r]);
+                            off += 4;
+                        }
+                    }
+                    let o = x * 4;
+                    if shift != 0 {
+                        out[o] = ((sb + half) >> shift) as u8;
+                        out[o + 1] = ((sg + half) >> shift) as u8;
+                        out[o + 2] = ((sr + half) >> shift) as u8;
+                    } else {
+                        out[o] = ((sb + half) / area) as u8;
+                        out[o + 1] = ((sg + half) / area) as u8;
+                        out[o + 2] = ((sr + half) / area) as u8;
+                    }
+                    out[o + 3] = 255;
+                }
+            }
+            return;
+        }
+    }
     // 16.16 fixed point source coordinates of each destination pixel centre.
     let x_ratio = ((sw as u64) << 16) / dw as u64;
     let y_ratio = ((sh as u64) << 16) / dh as u64;

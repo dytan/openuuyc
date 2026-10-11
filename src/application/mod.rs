@@ -84,8 +84,8 @@ pub fn component_operation(
     crate::platform::windows::components::execute(kind, operation, allow_sas, owner, removal)
 }
 #[cfg(target_os = "linux")]
-pub fn host_selftest() -> anyhow::Result<()> {
-    let report = crate::platform::linux::host::selftest::run()?;
+pub fn host_selftest(bench: Option<u32>) -> anyhow::Result<()> {
+    let report = crate::platform::linux::host::selftest::run(bench)?;
     println!("{report}");
     Ok(())
 }

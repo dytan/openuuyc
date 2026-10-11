@@ -201,16 +201,34 @@ impl Desktop {
         &mut self,
         timeout: u32,
         quality: i32,
+        cursor: bool,
+        hdr: bool,
+        maximum: (u32, u32),
+    ) -> Result<Option<Frame>> {
+        Ok(self.next_timed(timeout, quality, cursor, hdr, maximum)?.map(|(f, _, _)| f))
+    }
+
+    /// Like [`Self::next`] but also returns the grab and scale/convert
+    /// durations, for the `host-selftest --bench` profiler.
+    pub fn next_timed(
+        &mut self,
+        timeout: u32,
+        quality: i32,
         _cursor: bool,
         _hdr: bool,
         maximum: (u32, u32),
-    ) -> Result<Option<Frame>> {
+    ) -> Result<Option<(Frame, Duration, Duration)>> {
         let timeout = Duration::from_millis(u64::from(timeout.max(1)));
         let captured = Instant::now();
         let mut out = std::mem::take(&mut self.scratch);
+        let mut grab_dur = Duration::ZERO;
+        let mut scale_dur = Duration::ZERO;
         let size = match &mut self.backend {
             Backend::Wayland(copy) => {
-                let Some(raw) = copy.grab(true, timeout)? else {
+                let grab_started = Instant::now();
+                let grabbed = copy.grab(true, timeout)?;
+                grab_dur = grab_started.elapsed();
+                let Some(raw) = grabbed else {
                     self.scratch = out;
                     return Ok(None);
                 };
@@ -220,6 +238,7 @@ impl Desktop {
                     self.screen.height = raw.height;
                     self.generation = self.generation.wrapping_add(1);
                 }
+                let scale_started = Instant::now();
                 scale::convert(
                     raw.data,
                     raw.width,
@@ -231,12 +250,17 @@ impl Desktop {
                     size.1,
                     &mut out,
                 );
+                scale_dur = scale_started.elapsed();
                 size
             }
             Backend::X11(x) => {
+                let grab_started = Instant::now();
                 let (data, w, h) = x.grab()?;
+                grab_dur = grab_started.elapsed();
                 let size = target(w, h, quality, maximum);
+                let scale_started = Instant::now();
                 scale::convert(&data, w, h, w as usize * 4, false, false, size.0, size.1, &mut out);
+                scale_dur = scale_started.elapsed();
                 size
             }
         };
@@ -251,7 +275,7 @@ impl Desktop {
             is_new,
             hdr_metadata: None,
         };
-        Ok(Some(frame))
+        Ok(Some((frame, grab_dur, scale_dur)))
     }
 }
 
