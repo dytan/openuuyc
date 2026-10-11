@@ -98,6 +98,11 @@ impl Manager {
         self.pending.is_some()
     }
     pub(super) fn button(&mut self, ui: &mut egui::Ui, active: bool) {
+        // Linux installs and updates through distro packages; no service.
+        if cfg!(not(windows)) {
+            let _ = (ui, active);
+            return;
+        }
         self.poll();
         if self.status.is_none() && self.error.is_none() && self.pending.is_none() {
             self.work(None, ui.ctx().clone());
@@ -135,6 +140,17 @@ impl Manager {
         });
     }
     pub(super) fn management(&mut self, ui: &mut egui::Ui, active: bool) {
+        if cfg!(not(windows)) {
+            let _ = active;
+            section(ui, "服务管理");
+            ui.label(
+                egui::RichText::new(
+                    "Linux 版本仅作控制端使用，无常驻服务或驱动；请通过发行版软件包、AppImage 或 install.sh 安装和更新。",
+                )
+                .color(crate::ui::theme::MUTED),
+            );
+            return;
+        }
         self.poll();
         section(ui, "服务管理");
         let label = self
@@ -251,6 +267,13 @@ impl Manager {
         }
     }
     fn dialogs(&mut self, ctx: &egui::Context, active: bool, home: bool) {
+        if cfg!(not(windows)) {
+            // No first-run "install service" offer and no install errors.
+            self.confirm = None;
+            self.audio_confirm = None;
+            let _ = (ctx, active, home);
+            return;
+        }
         self.audio_dialog(ctx, active);
         if home
             && !self.offered

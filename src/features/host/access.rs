@@ -357,22 +357,30 @@ impl Handle {
         if crate::platform::windows::host_service::resident::managed() {
             return Ok(());
         }
-        tokio::task::spawn_blocking(super::displays::recovery::recover_abandoned).await??;
-        let screens = capture::screens()?;
-        let Some(screen) = screens
-            .iter()
-            .find(|s| s.primary)
-            .or(screens.first())
-            .cloned()
-        else {
-            return Ok(());
-        };
-        let owner = self.clone();
-        self.media
-            .prepare(screen, move || {
-                !cancel.is_cancelled() && lock(&owner.ownership).active
-            })
-            .await?;
+        // Linux is a controller-only build: there is no host capture/encode
+        // path to warm up. Viewer decode is probed per connection by the
+        // decoder pool (VA-API H.264/HEVC/AV1, then software).
+        #[cfg(not(windows))]
+        let _ = cancel;
+        #[cfg(windows)]
+        {
+            tokio::task::spawn_blocking(super::displays::recovery::recover_abandoned).await??;
+            let screens = capture::screens()?;
+            let Some(screen) = screens
+                .iter()
+                .find(|s| s.primary)
+                .or(screens.first())
+                .cloned()
+            else {
+                return Ok(());
+            };
+            let owner = self.clone();
+            self.media
+                .prepare(screen, move || {
+                    !cancel.is_cancelled() && lock(&owner.ownership).active
+                })
+                .await?;
+        }
         Ok(())
     }
     pub(crate) async fn invalidate_media(&self) {

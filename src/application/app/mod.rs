@@ -417,6 +417,12 @@ impl DeviceCenterApp {
                         self.status = StatusMessage::info(message);
                     }
                 }
+                GuiEvent::Warning(message) if host_only_failure(&message) => {
+                    tracing::debug!(%message, "host-only feature unavailable on Linux");
+                }
+                GuiEvent::Error(message) if host_only_failure(&message) => {
+                    tracing::debug!(%message, "host-only feature unavailable on Linux");
+                }
                 GuiEvent::Warning(message) => {
                     self.login_restore_error(&message);
                     self.refresh_pending = false;
@@ -1318,3 +1324,17 @@ fn qr_texture(ctx: &egui::Context, content: &str) -> Result<egui::TextureHandle>
 mod messages;
 mod runtime;
 mod viewing;
+
+/// Linux is controller-only: host-side shims fail with `UNSUPPORTED`. Those
+/// failures are expected and must never surface as a warning or dialog.
+fn host_only_failure(message: &str) -> bool {
+    #[cfg(not(windows))]
+    {
+        message.contains(crate::platform::windows::UNSUPPORTED)
+    }
+    #[cfg(windows)]
+    {
+        let _ = message;
+        false
+    }
+}
