@@ -101,6 +101,9 @@ impl Runner {
             return Ok(());
         }
         let context = egui::Context::default();
+        // egui is built without default_fonts: every context must install the
+        // bundled fonts (plus a system CJK face) or no text is drawn at all.
+        super::fonts::install(&context);
         context.set_embed_viewports(true);
         // WindowConfig sizes describe page content; the shared caption occupies
         // client space now, so preserve the page's requested and minimum size.

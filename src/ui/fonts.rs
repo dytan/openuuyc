@@ -113,6 +113,43 @@ fn system_cjk_candidates() -> Vec<(PathBuf, u32)> {
                 || path.contains("NotoSerifCJK-Regular.ttc");
             (PathBuf::from(path), if noto { NOTO_SC } else { 0 })
         })
+        .chain(fontconfig_cjk())
         .collect()
     }
+}
+
+/// Distributions install CJK fonts under many names and paths; ask fontconfig
+/// for any regular face covering Simplified Chinese when the fixed list misses.
+#[cfg(not(windows))]
+fn fontconfig_cjk() -> Vec<(PathBuf, u32)> {
+    let Ok(output) = std::process::Command::new("fc-list")
+        .args([":lang=zh-cn:style=Regular", "file", "index"])
+        .output()
+    else {
+        return Vec::new();
+    };
+    let mut faces: Vec<(PathBuf, u32)> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            // "path: :index=N"
+            let (path, rest) = line.split_once(':')?;
+            let index = rest
+                .split("index=")
+                .nth(1)
+                .and_then(|value| value.trim().parse().ok())
+                .unwrap_or(0);
+            Some((PathBuf::from(path.trim()), index))
+        })
+        .filter(|(path, _)| {
+            path.extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "ttf" | "otf" | "ttc"))
+        })
+        .collect();
+    // Prefer Sans faces, then smaller files (cheaper to load into egui).
+    faces.sort_by_key(|(path, _)| {
+        let name = path.to_string_lossy().to_ascii_lowercase();
+        (!name.contains("sans"), std::fs::metadata(path).map_or(u64::MAX, |m| m.len()))
+    });
+    faces
 }
