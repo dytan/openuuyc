@@ -1,4 +1,5 @@
 //! Linux controlled-side (host) building blocks.
+pub(crate) mod dmabuf;
 pub(crate) mod input;
 pub(crate) mod keymap;
 pub(crate) mod pointer;

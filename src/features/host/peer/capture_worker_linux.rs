@@ -62,8 +62,11 @@ pub(super) fn capture_loop(
     // dmabuf capture lands. OPENUUYC_ZEROCOPY=1 enables it with auto-fallback.
     let mut zerocopy = std::env::var_os("OPENUUYC_ZEROCOPY").is_some_and(|v| v != "0");
     if zerocopy {
-        tracing::info!("OPENUUYC_ZEROCOPY 已启用（GPU VPP 缩放，失败自动回退）");
+        tracing::info!("OPENUUYC_ZEROCOPY 已启用（dmabuf 零拷贝→shm+VPP→CPU 自动回退）");
     }
+    // Zero-copy dmabuf capture tier. Lazily opened once the VA encoder exists so
+    // it can share its display; None until then or after a fallback.
+    let mut dmabuf_cap: Option<crate::platform::linux::host::dmabuf::DmabufCapture> = None;
     // Publish the pointer over the cursor channel independently of video,
     // like the Windows host. While this sampler is alive the capture path
     // excludes the cursor from the frame (host::pointer::available()).
@@ -279,13 +282,28 @@ pub(super) fn capture_loop(
         } else {
             next + period
         };
-        let captured = desktop.as_mut().context("缺少采集源")?.next(
-            wait_ms,
-            wanted.quality,
-            wanted.cursor_capture,
-            wanted.color.is_hdr(),
-            wanted.maximum,
-        );
+        // When the dmabuf tier is live the pixels are captured zero-copy in the
+        // encode step; emit a metadata-only frame so loop bookkeeping is intact
+        // and the expensive shm grab+normalise is skipped entirely.
+        let use_dmabuf = zerocopy && dmabuf_cap.is_some();
+        let captured = if use_dmabuf {
+            Ok(Some(capture::Frame {
+                width: screen.width,
+                height: screen.height,
+                texture: std::sync::Arc::new(Vec::new()),
+                captured: Instant::now(),
+                is_new: true,
+                hdr_metadata: None,
+            }))
+        } else {
+            desktop.as_mut().context("缺少采集源")?.next(
+                wait_ms,
+                wanted.quality,
+                wanted.cursor_capture,
+                wanted.color.is_hdr(),
+                wanted.maximum,
+            )
+        };
         metrics.capture.record(capture_started.elapsed());
         let captured = captured?;
         let capture_state = desktop.as_ref().context("缺少采集源")?;
@@ -464,7 +482,46 @@ pub(super) fn capture_loop(
                 frame_metadata.pop_first();
             }
             let encoded = if zerocopy && active_encoder.vpp_available() {
-                // Full-res grab + GPU VPP scale into the encoder's configured size.
+                // Tier 1: zero-copy dmabuf capture straight into a VA surface.
+                if dmabuf_cap.is_none() {
+                    if let Some(display) = active_encoder.va_display() {
+                        match crate::platform::linux::host::dmabuf::DmabufCapture::open(
+                            display,
+                            &screen.device_name,
+                        ) {
+                            Ok(c) => {
+                                tracing::info!("dmabuf 零拷贝采集已启用");
+                                dmabuf_cap = Some(c);
+                            }
+                            Err(error) => {
+                                tracing::warn!(%error, "dmabuf 采集不可用，使用 shm+VPP");
+                            }
+                        }
+                    }
+                }
+                let mut dmabuf_done: Option<Result<Vec<_>>> = None;
+                if let Some(cap) = dmabuf_cap.as_mut() {
+                    let cursor = !crate::platform::linux::host::pointer::available();
+                    match cap.grab(cursor, Duration::from_millis(u64::from(wait_ms) + 60)) {
+                        Ok(Some((src_id, sw, sh))) => {
+                            dmabuf_done =
+                                Some(active_encoder.encode_surface(src_id, sw, sh, timestamp, force));
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            tracing::warn!(%error, "dmabuf 采集失败，回退 shm+VPP");
+                            dmabuf_cap = None;
+                        }
+                    }
+                }
+                if let Some(Err(error)) = &dmabuf_done {
+                    tracing::warn!(%error, "dmabuf 编码失败，回退 shm+VPP");
+                    dmabuf_cap = None;
+                }
+                match dmabuf_done {
+                    Some(Ok(packets)) => Ok(packets),
+                    _ =>
+                // Tier 2: full-res shm grab + GPU VPP scale into the encoder size.
                 match desktop.as_mut().context("缺少采集源")?.next_full(wait_ms) {
                     Ok(Some((bgra, sw, sh, _grab, _norm))) => {
                         match active_encoder.encode_scaled(
@@ -504,6 +561,7 @@ pub(super) fn capture_loop(
                             &encode_cancel,
                         )
                     }
+                },
                 }
             } else {
                 active_encoder.encode_cancellable(

@@ -323,13 +323,14 @@ impl Encoder {
     /// memcpy of the source frame happens on the CPU; CSC and scaling run on the
     /// iGPU. `src_pitch` is the source row stride in bytes. Caller falls back to
     /// the CPU path on Err.
-    pub(super) fn encode_scaled(
+    /// GPU-encode a frame already present in VA surface `src_id` (e.g. a dmabuf
+    /// the compositor copied into). VPP scales+CSCs it into the split input
+    /// surface, then encodes. Zero CPU copies of pixel data.
+    pub(super) fn encode_surface(
         &mut self,
-        bgra: &[u8],
+        src_id: VASurfaceID,
         src_w: u32,
         src_h: u32,
-        src_pitch: usize,
-        _timestamp: i64,
         force: bool,
     ) -> Result<Vec<Packet>> {
         ensure!(self.vpp.is_some(), "VA-API VPP 未初始化");
@@ -337,15 +338,18 @@ impl Encoder {
             src_w >= 2 && src_h >= 2 && src_w % 2 == 0 && src_h % 2 == 0,
             "VPP 源尺寸非法: {src_w}x{src_h}"
         );
-        ensure!(
-            src_pitch >= src_w as usize * 4 && bgra.len() >= src_pitch * src_h as usize,
-            "VPP 源帧尺寸不足"
-        );
-        self.ensure_src_surface(src_w, src_h)?;
-        self.upload_bgra(src_w, src_h, src_pitch, bgra)?;
-        let src_surface = self.src_surface.as_ref().context("VPP 源表面缺失")?;
-        let src_id = src_surface.id();
+        self.vpp_to_input_and_encode(src_id, src_w, src_h, force)
+    }
 
+    /// Shared tail: VPP blit `src_id` -> input surface, sync, then encode with
+    /// the split input/recon layout. Respects OPENUUYC_VPP_BRIDGE.
+    fn vpp_to_input_and_encode(
+        &mut self,
+        src_id: VASurfaceID,
+        src_w: u32,
+        src_h: u32,
+        force: bool,
+    ) -> Result<Vec<Packet>> {
         let input = self
             .input_surface
             .take()
@@ -356,48 +360,13 @@ impl Encoder {
             .unwrap()
             .blit(src_id, (src_w, src_h), input_id, (self.width, self.height))
             .map_err(|e| anyhow::anyhow!("VA-API VPP 处理失败: {e}"))?;
-        // VPP already vaSyncSurface(dst); one more sync before BeginPicture so
-        // the encoder sees a settled input (required on iHD after VPP write).
         input
             .sync()
             .map_err(|e| anyhow::anyhow!("同步 VPP 输入表面失败: {e}"))?;
-        if std::env::var_os("OPENUUYC_VPP_DUMP_NV12").is_some()
-            && !VPP_NV12_DUMPED.swap(true, std::sync::atomic::Ordering::Relaxed)
-        {
-            match Image::create_from(
-                &input,
-                self.image_fmt,
-                (self.aligned_w, self.aligned_h),
-                (self.width, self.height),
-            ) {
-                Ok(img) => {
-                    let va = *img.image();
-                    let buf = img.as_ref();
-                    let (w, h) = (self.width as usize, self.height as usize);
-                    let py = va.pitches[0] as usize;
-                    let pc = va.pitches[1] as usize;
-                    let oy = va.offsets[0] as usize;
-                    let oc = va.offsets[1] as usize;
-                    let mut out = Vec::with_capacity(w * h * 3 / 2);
-                    for y in 0..h {
-                        out.extend_from_slice(&buf[oy + y * py..oy + y * py + w]);
-                    }
-                    for y in 0..h / 2 {
-                        out.extend_from_slice(&buf[oc + y * pc..oc + y * pc + w]);
-                    }
-                    let _ = std::fs::write("/tmp/vpp_dst.nv12", &out);
-                    eprintln!("VPP dst dumped {w}x{h} nv12 pitchY={py} ({} bytes)", out.len());
-                }
-                Err(e) => eprintln!("VPP dst dump create_from 失败: {e}"),
-            }
-        }
         let recon_id = self.surfaces[self.slot]
             .as_ref()
             .context("VA-API 重建表面缺失")?
             .id();
-        // Prefer direct BeginPicture(VPP output) + CurrPic(recon). The plane-copy
-        // bridge (GetImage/PutImage) is a fallback for drivers that don't accept
-        // a VPP-written surface as encode input — enable with OPENUUYC_VPP_BRIDGE=1.
         if std::env::var_os("OPENUUYC_VPP_BRIDGE").is_some() {
             let recon = self.surfaces[self.slot]
                 .take()
@@ -427,6 +396,33 @@ impl Encoder {
             return self.finish_encode_same(recon, rid, force);
         }
         self.finish_encode(input, recon_id, force)
+    }
+
+    pub(super) fn encode_scaled(
+        &mut self,
+        bgra: &[u8],
+        src_w: u32,
+        src_h: u32,
+        src_pitch: usize,
+        _timestamp: i64,
+        force: bool,
+    ) -> Result<Vec<Packet>> {
+        ensure!(self.vpp.is_some(), "VA-API VPP 未初始化");
+        ensure!(
+            src_w >= 2 && src_h >= 2 && src_w % 2 == 0 && src_h % 2 == 0,
+            "VPP 源尺寸非法: {src_w}x{src_h}"
+        );
+        ensure!(
+            src_pitch >= src_w as usize * 4 && bgra.len() >= src_pitch * src_h as usize,
+            "VPP 源帧尺寸不足"
+        );
+        self.ensure_src_surface(src_w, src_h)?;
+        self.upload_bgra(src_w, src_h, src_pitch, bgra)?;
+        let src_id = self.src_surface.as_ref().context("VPP 源表面缺失")?.id();
+        self.vpp_to_input_and_encode(src_id, src_w, src_h, force)
+    }
+    pub(super) fn display(&self) -> Rc<Display> {
+        Rc::clone(&self.display)
     }
 
     pub(super) fn vpp_available(&self) -> bool {
@@ -1140,7 +1136,7 @@ impl BitWriter {
     }
 }
 
-fn open_display() -> Result<Rc<Display>> {
+pub(crate) fn open_display() -> Result<Rc<Display>> {
     for index in 128..136u32 {
         let path = format!("/dev/dri/renderD{index}");
         if let Ok(display) = Display::open_drm_display(&path)

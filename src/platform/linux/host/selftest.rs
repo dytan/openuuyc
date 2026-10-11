@@ -36,6 +36,12 @@ pub fn run(bench: Option<u32>) -> Result<String> {
 
     let mut desktop = Desktop::open_selected(&screen).context("打开采集源失败")?;
     line!("采集后端: {}", desktop.backend_name());
+    if std::env::var_os("OPENUUYC_DMABUF_PROBE").is_some() {
+        match crate::platform::linux::host::dmabuf::probe_default(&screen.device_name) {
+            Ok(m) => line!("{m}"),
+            Err(e) => line!("dmabuf probe 失败: {e:#}"),
+        }
+    }
 
     let mut frame = None;
     let started = Instant::now();
@@ -364,6 +370,12 @@ pub fn run(bench: Option<u32>) -> Result<String> {
                             }
                             line!("  vpp_unit{idx} len={} 首字节={:02x?} NAL类型={:?}", u.len(), &u[..u.len().min(10)], types);
                         }
+                        if std::env::var_os("OPENUUYC_HOST_DUMP").is_some() {
+                            let mut all = Vec::new();
+                            for u in &vp_units { all.extend_from_slice(u); }
+                            let _ = std::fs::write("/tmp/vpp_full.h264", &all);
+                            line!("  已导出完整码流 /tmp/vpp_full.h264 ({} KB)", all.len() / 1024);
+                        }
                         let mut swd = openuuyc_codec::decoder::Decoder::new(
                             openuuyc_codec::Codec::H264,
                             &[],
@@ -398,6 +410,116 @@ pub fn run(bench: Option<u32>) -> Result<String> {
                     }
                 } else {
                     line!("  （VA-API VPP 不可用，跳过 GPU 缩放基准）");
+                }
+
+                // Zero-copy dmabuf path: compositor copies the frame straight
+                // into a VA surface; GPU VPP scales+CSCs into the encode input.
+                line!("");
+                line!("VA-API dmabuf 零拷贝基准：{frames} 帧（compositor→VA表面→GPU VPP→GPU编码→解码校验）");
+                match crate::platform::linux::encoder::Encoder::hardware_format(
+                    &(),
+                    (frame.width, frame.height),
+                    Format::AVC,
+                    rate,
+                    crate::features::host::format::Color::Sdr,
+                ) {
+                    Ok(mut dz) if dz.vpp_available() => match dz.va_display() {
+                        Some(display) => {
+                            match crate::platform::linux::host::dmabuf::DmabufCapture::open(
+                                display,
+                                &screen.device_name,
+                            ) {
+                                Ok(mut cap) => {
+                                    let cursor = !crate::platform::linux::host::pointer::available();
+                                    let mut dz_grab = Vec::new();
+                                    let mut dz_enc = Vec::new();
+                                    let mut dz_bytes = 0usize;
+                                    let mut dz_units: Vec<Vec<u8>> = Vec::new();
+                                    let mut dz_frames = 0u32;
+                                    let started = Instant::now();
+                                    for i in 0..frames {
+                                        let g0 = Instant::now();
+                                        let got = match cap.grab(cursor, Duration::from_millis(200)) {
+                                            Ok(g) => g,
+                                            Err(e) => {
+                                                line!("  dmabuf 采集失败（将回退）：{e:#}");
+                                                break;
+                                            }
+                                        };
+                                        let Some((src_id, sw, sh)) = got else { continue };
+                                        let grab = g0.elapsed();
+                                        let e0 = Instant::now();
+                                        let force = dz_frames == 0 || i % 60 == 0;
+                                        let packets = match dz.encode_surface(
+                                            src_id,
+                                            sw,
+                                            sh,
+                                            (i as i64) * 10_000,
+                                            force,
+                                        ) {
+                                            Ok(p) => p,
+                                            Err(e) => {
+                                                line!("  dmabuf 编码失败（将回退）：{e:#}");
+                                                break;
+                                            }
+                                        };
+                                        dz_enc.push(e0.elapsed().as_secs_f64() * 1000.0);
+                                        dz_grab.push(grab.as_secs_f64() * 1000.0);
+                                        for pk in &packets {
+                                            dz_bytes += pk.data.len();
+                                            if dz_units.len() < 240 {
+                                                dz_units.push(pk.data.clone());
+                                            }
+                                        }
+                                        dz_frames += 1;
+                                    }
+                                    let elapsed = started.elapsed();
+                                    if dz_frames > 0 {
+                                        if std::env::var_os("OPENUUYC_HOST_DUMP").is_some() {
+                                            let mut all = Vec::new();
+                                            for u in &dz_units { all.extend_from_slice(u); }
+                                            let _ = std::fs::write("/tmp/dmabuf_full.h264", &all);
+                                            line!("  已导出完整码流 /tmp/dmabuf_full.h264 ({} KB)", all.len() / 1024);
+                                        }
+                                        let mut swd = openuuyc_codec::decoder::Decoder::new(
+                                            openuuyc_codec::Codec::H264,
+                                            &[],
+                                        )
+                                        .context("创建软件解码器失败")?;
+                                        let mut sw_errors = 0u32;
+                                        let mut sw_decoded = 0usize;
+                                        for u in &dz_units {
+                                            match swd.push(u, 0) {
+                                                Ok(fr) => sw_decoded += fr.len(),
+                                                Err(_) => sw_errors += 1,
+                                            }
+                                        }
+                                        line!("  码流: {} KB", dz_bytes / 1024);
+                                        line!("  dmabuf 抓帧(零拷贝): p50 {:.1} ms  p95 {:.1} ms", pct(&mut dz_grab.clone(), 0.50), pct(&mut dz_grab.clone(), 0.95));
+                                        line!("  VPP+编码:            p50 {:.1} ms  p95 {:.1} ms", pct(&mut dz_enc.clone(), 0.50), pct(&mut dz_enc.clone(), 0.95));
+                                        let fps = dz_frames as f64 / elapsed.as_secs_f64();
+                                        line!("  串行可达帧率:        {:.1} fps（{} 帧用时 {} ms）", fps, dz_frames, elapsed.as_millis());
+                                        line!("  软件解码校验: 还原 {sw_decoded} 帧, 解码错误 {sw_errors} 个");
+                                        match crate::platform::linux::decoder::vaapi_decode_roundtrip(frame.width, frame.height, &dz_units) {
+                                            Ok(n) => line!("  VA-API 解码校验: 还原 {n} 帧"),
+                                            Err(e) => line!("  VA-API 解码校验: 不可用（{e:#}）"),
+                                        }
+                                        if sw_errors == 0 && sw_decoded > 0 {
+                                            line!("  ✓ dmabuf 零拷贝路径码流解码干净");
+                                        } else {
+                                            line!("  ✗ dmabuf 零拷贝路径码流解码存在问题");
+                                        }
+                                    } else {
+                                        line!("  dmabuf 基准无有效帧");
+                                    }
+                                }
+                                Err(e) => line!("  dmabuf 采集初始化失败（将回退 shm）：{e:#}"),
+                            }
+                        }
+                        None => line!("  （无 VA 显示，跳过 dmabuf 基准）"),
+                    },
+                    Ok(_) => line!("  （VA-API VPP 不可用，跳过 dmabuf 基准）"),
+                    Err(e) => line!("  无法创建 dmabuf 编码器：{e:#}"),
                 }
             }
         }

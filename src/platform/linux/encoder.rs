@@ -8,7 +8,7 @@ use openuuyc_codec::encoder::{Config, Encoder as Core};
 use std::sync::{Arc, atomic::AtomicBool};
 
 #[path = "encoder_vaapi.rs"]
-mod vaapi;
+pub(crate) mod vaapi;
 
 pub(crate) use crate::media::encoding::{Encoded, FrameTiming};
 
@@ -312,6 +312,43 @@ impl Encoder {
         match &self.inner {
             Inner::Vaapi(v) => v.vpp_available(),
             Inner::Software(_) => false,
+        }
+    }
+
+    /// Share the VA-API display so a dmabuf capture can allocate surfaces that
+    /// VPP can read. None on the software backend.
+    pub(crate) fn va_display(&self) -> Option<std::rc::Rc<cros_libva::Display>> {
+        match &self.inner {
+            Inner::Vaapi(v) => Some(v.display()),
+            Inner::Software(_) => None,
+        }
+    }
+
+    /// GPU-encode a frame already resident in VA surface `src_id` (dmabuf path).
+    pub(crate) fn encode_surface(
+        &mut self,
+        src_id: cros_libva::VASurfaceID,
+        src_w: u32,
+        src_h: u32,
+        timestamp: i64,
+        keyframe: bool,
+    ) -> Result<Vec<Encoded>> {
+        let color = format::Color::Sdr.space(None);
+        match &mut self.inner {
+            Inner::Vaapi(v) => Ok(v
+                .encode_surface(src_id, src_w, src_h, keyframe)?
+                .into_iter()
+                .map(|p| Encoded {
+                    data: p.data,
+                    keyframe: p.keyframe,
+                    timestamp_100ns: timestamp,
+                    is_new: true,
+                    timing: None,
+                    format: self.format,
+                    color,
+                })
+                .collect()),
+            Inner::Software(_) => anyhow::bail!("软件编码器不支持 dmabuf 零拷贝"),
         }
     }
 

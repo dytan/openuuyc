@@ -44,16 +44,18 @@ pub(crate) struct Output {
 #[derive(Default)]
 pub(super) struct State {
     pub outputs: Vec<(Option<wl_output::WlOutput>, Output)>,
-    frame: FrameState,
+    pub(super) frame: FrameState,
 }
 
 #[derive(Default)]
-struct FrameState {
-    buffer: Option<(u32, u32, u32, u32)>,
-    buffer_done: bool,
-    y_invert: bool,
-    ready: bool,
-    failed: bool,
+pub(super) struct FrameState {
+    pub(super) buffer: Option<(u32, u32, u32, u32)>,
+    /// linux_dmabuf offer: (fourcc, width, height).
+    pub(super) dmabuf: Option<(u32, u32, u32)>,
+    pub(super) buffer_done: bool,
+    pub(super) y_invert: bool,
+    pub(super) ready: bool,
+    pub(super) failed: bool,
 }
 
 impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for State {
@@ -174,6 +176,15 @@ impl Dispatch<ZwlrScreencopyFrameV1, ()> for State {
                     WEnum::Unknown(f) => f & 1 != 0,
                 };
             }
+            zwlr_screencopy_frame_v1::Event::LinuxDmabuf {
+                format,
+                width,
+                height,
+            } => {
+                if frame.dmabuf.is_none() {
+                    frame.dmabuf = Some((format, width, height));
+                }
+            }
             zwlr_screencopy_frame_v1::Event::BufferDone => frame.buffer_done = true,
             zwlr_screencopy_frame_v1::Event::Ready { .. } => frame.ready = true,
             zwlr_screencopy_frame_v1::Event::Failed => frame.failed = true,
@@ -230,14 +241,14 @@ pub(super) fn dispatch_until(
     }
 }
 
-fn connect() -> Result<(Connection, GlobalList, EventQueue<State>)> {
+pub(super) fn connect() -> Result<(Connection, GlobalList, EventQueue<State>)> {
     let connection = Connection::connect_to_env().context("无法连接 Wayland 合成器")?;
     let (globals, queue) =
         registry_queue_init::<State>(&connection).context("读取 Wayland 全局对象失败")?;
     Ok((connection, globals, queue))
 }
 
-fn bind_outputs(
+pub(super) fn bind_outputs(
     globals: &GlobalList,
     qh: &QueueHandle<State>,
     state: &mut State,
