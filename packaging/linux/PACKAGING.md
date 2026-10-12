@@ -16,8 +16,10 @@ entry (`Exec` launches the GUI), and hicolor icons. **VA-API / Vulkan GPU
 drivers are never bundled** — install them from the host distro (see
 `INSTALL.txt`).
 
-Version always comes from the first `version =` in `Cargo.toml` (currently
-keep in sync with release tags `v*`).
+Local package scripts read the first `version =` in `Cargo.toml` (the app
+engine, upstream `1.0.0-rc.2`). Published Linux tags stay on the `v0.x` line
+(`v0.8.1`); a tag push uses the tag name as the artifact version. See
+[`RELEASE-NOTES.md`](RELEASE-NOTES.md).
 
 ## Quick install one-liners
 

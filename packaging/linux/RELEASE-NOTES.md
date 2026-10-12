@@ -1,38 +1,37 @@
-### Linux host milestone
+### Linux v0.8.1
 
-This release makes a Linux box usable as a **controlled device** (被控 / host),
-driven from a Windows or macOS controller — not just a controller itself.
+Documentation release plus one host clipboard fix since v0.8.0. Functional host
+features are otherwise unchanged from v0.8.0.
 
-**New since v0.7.0**
-- **VA-API hardware H.264 encode**, selected automatically after an
-  encode→decode round-trip validates on the machine; **software H.264** is the
-  automatic fallback. Override with `OPENUUYC_HOST_ENCODER=software|vaapi`.
-- **Separate cursor channel** on Hyprland (mouse moves no longer cost a video
-  frame), like the Windows host.
-- **Clipboard sync both ways** — text, images, and files — using the Windows
-  clipboard dialect so Windows *and* macOS controllers interoperate.
-- **Host-side file receive** into `~/Downloads` via the file-transfer Send path.
-- **Wake a DPMS-blanked panel on connect**, so an idle laptop with no local input
-  never serves a black screen.
-- Robustness: the capture/encode worker degrades (shm → CPU) instead of tearing
-  the session down when a frame path hiccups.
+**Since v0.8.0**
 
-**Experimental: zero-copy GPU capture (opt-in, OFF by default)**
-- `OPENUUYC_ZEROCOPY=1` enables dmabuf `zwlr_screencopy` → VA import → VPP
-  scale/CSC → VA-API encode, with automatic fallback (dmabuf → shm+VPP → CPU).
-- Not yet soak-tested broadly. Leave it **off** for routine use; opt in only to
-  test and turn it off if you see quality dips or stalls.
+- **Sticky-image clipboard fix** (`0b9cfad`). After an image sync, a later text
+  copy could still paste as the old image: a slow in-flight image fetch could
+  finish after a newer text offer and overwrite the local clipboard, and the
+  host kept advertising the leftover image. Remote accepts are now sequenced and
+  discarded when stale, and a new text copy is advertised as text only.
+- **Upstream rename.** The upstream project is now **Farwing**
+  ([djkcyl/farwing](https://github.com/djkcyl/farwing)). `djkcyl/openuuyc`
+  resolves to that repository. This fork's app binary and UI remain OpenUUYC.
+  The README carries the upstream Farwing introduction and the project
+  acknowledgements.
+- **Linux status docs.** `LINUX.md` matches host mode (v0.8.0+). Linux is a
+  controller and a controlled host.
 
-**Known limitations**
-- Viewer drag-drop onto the video window does not write files yet — use the
-  file-transfer **Send** button.
-- Linux → controller file clipboard is partial (text/images are reliable).
-- GNOME/KDE Wayland capture needs the ScreenCast portal (not supported yet).
-- Non-ASCII / IME text injection and some Windows system chords are unsupported.
-- Input injection needs access to `/dev/uinput` (see `LINUX-HOST.md`).
+**Unchanged from v0.8.0**
+
+A Linux machine can still be a controlled host: VA-API or software H.264 encode,
+separate cursor on Hyprland, bidirectional clipboard (text, images, and files),
+file receive into `~/Downloads`, DPMS wake on connect, and experimental
+zero-copy (`OPENUUYC_ZEROCOPY=1`, off by default). The same limits apply:
+GNOME/KDE Wayland capture is unsupported, viewer drag-drop onto the video
+window does not write files (use file-transfer **Send**), Linux → controller
+file clipboard is partial, and input injection needs `/dev/uinput`. Full notes:
+`LINUX-HOST.md`.
 
 **Recommended defaults:** `OPENUUYC_ZEROCOPY` unset/0; `OPENUUYC_HOST_ENCODER`
-unset (auto). Full host notes: `LINUX-HOST.md`.
+unset (auto).
 
-> The Linux port keeps its own release line (`v0.1.0 … v0.8.0`); the underlying
-> app engine is upstream `1.0.0-rc.2`, which is the version the app reports.
+> The Linux port keeps its own release line. `v0.8.1` is this packaging tag.
+> `Cargo.toml` stays at upstream `1.0.0-rc.2`, which is the version the app
+> reports.

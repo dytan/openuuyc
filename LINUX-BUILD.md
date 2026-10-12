@@ -143,8 +143,11 @@ Arch packages (`.pkg.tar.zst`) are built on an Arch host with
 [`packaging/linux/PACKAGING.md`](packaging/linux/PACKAGING.md).
 
 - **`workflow_dispatch`**: upload Actions artifacts only (no Release).
-- **Push tag `v*`** (e.g. `v1.0.0-rc.2` matching `Cargo.toml`; a `-` version is published as a prerelease): create a GitHub Release
-  attaching tarball + AppImage + `.deb`.
+- **Push tag `v*`** on `linux/host`: create a GitHub Release attaching tarball +
+  AppImage + `.deb`. This fork's Linux tags are the `v0.x` line (current notes:
+  [`RELEASE-NOTES.md`](packaging/linux/RELEASE-NOTES.md) for `v0.8.1`).
+  `Cargo.toml` stays at upstream `1.0.0-rc.2`; a tag ref uses the tag name as
+  the package version. A tag containing `-` is published as a prerelease.
 
 Consumers on a compatible x86_64 glibc distro can run prebuilts without a local
 Rust toolchain. They still need runtime packages (libva + drivers, fuse3,

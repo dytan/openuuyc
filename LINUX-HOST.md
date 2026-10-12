@@ -112,6 +112,19 @@ controllable; whether the server fully honours a non-Windows host, and whether a
 controller interoperates with this H.264 stream and input, can only be confirmed
 by the connection test above.
 
+## v0.8.1
+
+Functional host features in this document are unchanged from v0.8.0 aside from
+one clipboard fix. Release notes:
+[`packaging/linux/RELEASE-NOTES.md`](packaging/linux/RELEASE-NOTES.md).
+
+- **Sticky-image clipboard** (`0b9cfad`). After an image sync, a later text copy
+  no longer pastes as the old image. Remote clipboard accepts are sequenced, and
+  a new text copy is advertised as text only.
+- **Docs.** Upstream is now [Farwing](https://github.com/djkcyl/farwing)
+  (`djkcyl/openuuyc` resolves there). This branch's binary and UI stay
+  OpenUUYC. [`LINUX.md`](LINUX.md) matches host mode.
+
 ## v0.8.0 review (Linux host milestone)
 
 This release turns the minimum-viable host into a usable one: hardware encode,
@@ -146,7 +159,9 @@ laptops and the zero-copy path.
   software).
 
 ### Versioning
-The Linux port keeps its own release line (`v0.1.0 … v0.8.0`). The underlying
-app engine is upstream **1.0.0-rc.2**, which is what the app reports as its
-version string. `v0.8.0` is the Linux packaging/milestone tag, not the engine
-version.
+The Linux port keeps its own release line (`v0.8.1` current; `v0.8.0` is the
+host milestone). The underlying app engine is upstream **1.0.0-rc.2**, which is
+what the app reports as its version string. `Cargo.toml` stays at that engine
+version. `v0.8.1` is the Linux packaging tag, not the engine version. The
+upstream project is now **Farwing**
+([djkcyl/farwing](https://github.com/djkcyl/farwing)).
