@@ -169,6 +169,10 @@ impl LocalSnapshot {
                 "FileGroupDescriptorW".into(),
             ));
             ids.push((formats::register("FileContents"), "FileContents".into()));
+            ids.push((
+                formats::register("Preferred DropEffect"),
+                "Preferred DropEffect".into(),
+            ));
             return ids;
         }
         if self.text.is_some() {
@@ -209,7 +213,19 @@ impl LocalSnapshot {
             {
                 self.image.clone().context("本地剪贴板没有图片")
             },
-            _ => bail!("不支持的本地剪贴板格式"),
+            _ if format.wire.name.eq_ignore_ascii_case("FileGroupDescriptorW")
+                || format.wire.name.eq_ignore_ascii_case("FileGroupDescriptor") =>
+            {
+                ensure!(!self.sources.is_empty(), "本地剪贴板没有文件");
+                let files = collect_files(&self.sources)?;
+                let descs: Vec<_> = files.items.iter().map(|f| f.desc.clone()).collect();
+                descriptor_bytes(&descs)
+            }
+            _ if format.wire.name.eq_ignore_ascii_case("Preferred DropEffect") => {
+                // DROPEFFECT_COPY = 1
+                Ok(1u32.to_le_bytes().to_vec())
+            }
+            _ => bail!("不支持的本地剪贴板格式 {}", format.wire.name),
         }
     }
 }
@@ -304,6 +320,28 @@ fn collect_files(paths: &[PathBuf]) -> Result<LocalFiles> {
     }
     ensure!(!items.is_empty(), "文件列表为空");
     Ok(LocalFiles { items })
+}
+
+/// Encode descriptors as a Windows FILEGROUPDESCRIPTORW blob (DWORD count +
+/// N × 592-byte FILEDESCRIPTORW). Same layout the Windows host parses.
+fn descriptor_bytes(items: &[ClipboardFileDescriptor]) -> Result<Vec<u8>> {
+    ensure!(items.len() <= MAX_FILES, "文件数量过多");
+    let mut bytes = vec![0u8; 4 + items.len() * 592];
+    bytes[..4].copy_from_slice(&(items.len() as u32).to_le_bytes());
+    for (slot, file) in bytes[4..].chunks_exact_mut(592).zip(items) {
+        ensure!(formats::safe_name(&file.file_name), "不安全的文件名称");
+        // FD_ATTRIBUTES | FD_WRITESTIME | FD_FILESIZE | FD_PROGRESSUI
+        slot[..4].copy_from_slice(&0x4064u32.to_le_bytes());
+        slot[36..40].copy_from_slice(&file.file_attributes.to_le_bytes());
+        slot[56..64].copy_from_slice(&file.last_write_time.to_le_bytes());
+        slot[64..68].copy_from_slice(&((file.file_size >> 32) as u32).to_le_bytes());
+        slot[68..72].copy_from_slice(&(file.file_size as u32).to_le_bytes());
+        let win_name = file.file_name.replace('/', "\\");
+        for (out, c) in slot[72..].chunks_exact_mut(2).zip(win_name.encode_utf16()) {
+            out.copy_from_slice(&c.to_le_bytes());
+        }
+    }
+    Ok(bytes)
 }
 
 impl LocalFiles {
@@ -1202,7 +1240,7 @@ fn wl_paste_files() -> Vec<PathBuf> {
             _ => parse_uri_list(&output.stdout),
         };
         if !paths.is_empty() {
-            tracing::info!(mime, count = paths.len(), "wl-paste 读到本地文件剪贴板");
+            tracing::debug!(mime, count = paths.len(), "wl-paste 读到本地文件剪贴板");
             return paths;
         }
     }
@@ -1348,15 +1386,18 @@ fn poll_local(state: &mut State) -> Result<()> {
     // path on text/uri-list (no image/* offer); promote that to CF_DIB so a
     // Mac paste into Preview/Pages gets pixels rather than a broken file offer.
     // Screenshot tools usually offer image/png directly.
-    let image = read_local_image(clipboard, &sources);
-    let snapshot = if let Some(dib) = image {
-        LocalSnapshot {
-            image: Some(dib),
-            ..Default::default()
-        }
-    } else if !sources.is_empty() {
+    // File-manager copies (uri-list / gnome-copied-files) must stay file
+    // offers. Promoting a single image path to CF_DIB made Linux→Windows
+    // "copy photo.png → paste in Explorer" publish an image the shell cannot
+    // save as a file.
+    let snapshot = if !sources.is_empty() {
         LocalSnapshot {
             sources,
+            ..Default::default()
+        }
+    } else if let Some(dib) = read_local_image(clipboard, &[]) {
+        LocalSnapshot {
+            image: Some(dib),
             ..Default::default()
         }
     } else if let Some(text) = clipboard.get_text().ok().filter(|text| !text.is_empty()) {
@@ -1459,7 +1500,8 @@ fn serve(
                         id = session.id,
                         format = %ask.format_name,
                         format_id = ask.format_id,
-                        ok_empty = matches!(other, Ok(_)),
+                        ok_empty = matches!(&other, Ok(_)),
+                        error = %other.as_ref().err().map(|e| format!("{e:#}")).unwrap_or_default(),
                         "剪贴板格式数据准备失败或为空"
                     );
                     session.emit(
@@ -1852,4 +1894,26 @@ mod file_serve_tests {
         let plain = b"file:///tmp/k2.txt\r\n";
         assert_eq!(parse_kde_files(plain), vec![PathBuf::from("/tmp/k2.txt")]);
     }
+    #[test]
+    fn descriptor_bytes_encodes_count_and_name() {
+        let items = vec![ClipboardFileDescriptor {
+            file_name: "hello.txt".into(),
+            file_attributes: 0x80,
+            last_write_time: 0,
+            file_size: 5,
+        }];
+        let bytes = descriptor_bytes(&items).unwrap();
+        assert_eq!(u32::from_le_bytes(bytes[..4].try_into().unwrap()), 1);
+        assert_eq!(bytes.len(), 4 + 592);
+        assert_eq!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()), 0x4064);
+        assert_eq!(u32::from_le_bytes(bytes[4 + 68..4 + 72].try_into().unwrap()), 5);
+        let name: String = bytes[4 + 72..]
+            .chunks_exact(2)
+            .map(|p| u16::from_le_bytes([p[0], p[1]]))
+            .take_while(|c| *c != 0)
+            .map(|c| char::from_u32(c as u32).unwrap())
+            .collect();
+        assert_eq!(name, "hello.txt");
+    }
+
 }

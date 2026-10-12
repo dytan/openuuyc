@@ -155,10 +155,10 @@ pub(super) fn supported(id: u32, name: &str, files: bool) -> bool {
     }
     if file_format(id, name) {
         return files
-            && matches!(
+            && (matches!(
                 name,
                 "FileGroupDescriptorW" | "FileContents" | "public.file-url"
-            );
+            ) || name.eq_ignore_ascii_case("Preferred DropEffect"));
     }
     matches!(
         id,
