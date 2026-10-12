@@ -24,6 +24,12 @@ pub(super) use super::formats::safe_name;
 const MAX_CLIP: usize = 32 * 1024 * 1024;
 const POLL: Duration = Duration::from_millis(400);
 
+/// Monotonic id of the latest remote FormatList. Accept workers capture the id
+/// at spawn and discard their write if a newer offer arrived while they were
+/// fetching — otherwise a slow image fetch stomps a later text copy and the
+/// clipboard appears "stuck on the old image".
+static OFFER_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 pub(super) enum Command {
     Activate(Weak<Inner>),
     /// Files dropped on the viewer window, offered to the remote as a drag drop.
@@ -48,6 +54,10 @@ pub(super) enum Command {
         PreparedFiles,
         tokio::sync::oneshot::Sender<Result<(), String>>,
     ),
+    /// Remote accept worker finished writing the local clipboard; adopt the
+    /// snapshot on the main loop so FormatList drops the previous type
+    /// immediately (text clears image, image clears text).
+    Adopt(LocalSnapshot),
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -175,16 +185,18 @@ impl LocalSnapshot {
             ));
             return ids;
         }
-        if self.text.is_some() {
-            ids.push((13, String::new()));
-            ids.push((1, String::new()));
-        }
+        // Text and image are mutually exclusive in a snapshot. Prefer image when
+        // both somehow appear so a screenshot-with-alt-text stays an image offer;
+        // poll_local / Adopt never leave both set for a text-primary copy.
         if self.image.is_some() {
             // CF_DIB for Windows peers, plus the widely-supported "PNG"
             // registered format — macOS controllers often prefer PNG over DIB
             // when talking to a Windows-dialect host.
             ids.push((8, String::new()));
             ids.push((formats::register("PNG"), "PNG".into()));
+        } else if self.text.is_some() {
+            ids.push((13, String::new()));
+            ids.push((1, String::new()));
         }
         ids
     }
@@ -596,6 +608,25 @@ fn process(state: &mut State, command: Command) {
             state.published.remove(&id);
             state.explicit.remove(&id);
         }
+        Command::Adopt(snapshot) => {
+            if snapshot.text == state.local.text
+                && snapshot.image == state.local.image
+                && snapshot.sources == state.local.sources
+            {
+                return;
+            }
+            tracing::info!(
+                files = snapshot.sources.len(),
+                text = snapshot.text.as_ref().map(String::len),
+                image = snapshot.image.as_ref().map(Vec::len),
+                "采纳远端写入的本地剪贴板"
+            );
+            state.local = snapshot;
+            state.tasks.clear();
+            if let Err(error) = publish_local(state) {
+                tracing::debug!(%error, "采纳后发布本地剪贴板失败");
+            }
+        }
         Command::Offer(weak, epoch, formats, action) => {
             if let Some(session) = weak.upgrade().filter(|session| session.valid(epoch)) {
                 let names: Vec<_> = formats.iter().map(|f| f.name.as_str()).collect();
@@ -614,7 +645,8 @@ fn process(state: &mut State, command: Command) {
                 } else {
                     // Fetch + write must not block this worker: session.data() waits on
                     // peer replies that this same thread must keep pumping.
-                    accept_offer_async(session.clone(), epoch, formats)
+                    let seq = OFFER_SEQ.fetch_add(1, Ordering::AcqRel) + 1;
+                    accept_offer_async(session.clone(), epoch, formats, seq)
                 };
                 if let Err(error) = result {
                     tracing::warn!(error = format!("{error:#}"), "接受远端剪贴板失败");
@@ -770,16 +802,12 @@ fn accept_offer_async(
     session: Arc<Inner>,
     epoch: u64,
     formats: Vec<ClipboardFormat>,
+    seq: u64,
 ) -> Result<()> {
     std::thread::Builder::new()
         .name("clipboard accept".into())
         .spawn(move || {
-            // A private State slice is not available here; we write through a
-            // short-lived arboard handle and also ask the main worker to adopt
-            // the snapshot via a side channel would be ideal. For text/image we
-            // write directly with wl-copy/arboard; for files we still need the
-            // main worker's FUSE mount. Post back a synthetic local-only path:
-            if let Err(error) = accept_offer_standalone(session.clone(), epoch, formats) {
+            if let Err(error) = accept_offer_standalone(session.clone(), epoch, formats, seq) {
                 tracing::warn!(error = format!("{error:#}"), "应用远端剪贴板失败");
                 session.fail(error.to_string());
             }
@@ -793,8 +821,13 @@ fn accept_offer_standalone(
     session: Arc<Inner>,
     epoch: u64,
     offered: Vec<ClipboardFormat>,
+    seq: u64,
 ) -> Result<()> {
     if offered.is_empty() {
+        return Ok(());
+    }
+    if OFFER_SEQ.load(Ordering::Acquire) != seq {
+        tracing::debug!(seq, "丢弃过期远端剪贴板 FormatList");
         return Ok(());
     }
     let platform = session.platform.load(Ordering::Acquire);
@@ -806,6 +839,7 @@ fn accept_offer_standalone(
     tracing::info!(
         locals = ?links.iter().map(|l| l.local).collect::<Vec<_>>(),
         wires = ?links.iter().map(|l| l.wire.name.as_str()).collect::<Vec<_>>(),
+        seq,
         "远端剪贴板格式已解析"
     );
     if files && links.iter().any(|link| link.local == descriptor_format()) {
@@ -823,9 +857,9 @@ fn accept_offer_standalone(
             }),
         );
     }
-    // Prefer image over text: a Mac screenshot offer often includes both
-    // CF_UNICODETEXT / HTML Format and PNG/CF_DIB; picking text first made
-    // every image paste look like an empty-or-HTML text clipboard.
+    // Prefer image over text only when the offer actually includes an image:
+    // a Mac screenshot often ships CF_UNICODETEXT/HTML alongside PNG/CF_DIB.
+    // A text-only FormatList must never fall through to a stale image write.
     let Some(format) = [8u32, 17, 13, 1]
         .into_iter()
         .find_map(|id| links.iter().find(|format| format.local == id))
@@ -837,29 +871,50 @@ fn accept_offer_standalone(
     let data = session.data(epoch, &format.wire)?;
     ensure!(data.len() <= MAX_CLIP, "剪贴板内容过大");
     let data = formats::convert(data, &format, platform, false)?;
-    match format.local {
+    // Re-check after the (possibly slow) fetch so a newer FormatList wins.
+    if OFFER_SEQ.load(Ordering::Acquire) != seq {
+        tracing::debug!(seq, "丢弃过期远端剪贴板写入（已有更新的 FormatList）");
+        return Ok(());
+    }
+    let adopt = match format.local {
         13 => {
             let text = utf16_text(&data)?;
             write_text_external(&text)?;
-            tracing::info!(chars = text.len(), "已写入远端文本到本地剪贴板");
+            tracing::info!(chars = text.len(), seq, "已写入远端文本到本地剪贴板");
+            LocalSnapshot {
+                text: Some(text),
+                ..Default::default()
+            }
         }
         1 => {
             let text = String::from_utf8_lossy(&data)
                 .trim_end_matches('\0')
                 .replace("\r\n", "\n");
             write_text_external(&text)?;
-            tracing::info!(chars = text.len(), "已写入远端文本到本地剪贴板");
+            tracing::info!(chars = text.len(), seq, "已写入远端文本到本地剪贴板");
+            LocalSnapshot {
+                text: Some(text),
+                ..Default::default()
+            }
         }
         8 | 17 => {
             write_image_external(&data)?;
-            tracing::info!(bytes = data.len(), "已写入远端图片到本地剪贴板");
+            tracing::info!(bytes = data.len(), seq, "已写入远端图片到本地剪贴板");
+            LocalSnapshot {
+                image: Some(data),
+                ..Default::default()
+            }
         }
         _ => return Ok(()),
+    };
+    // Final seq check after the write: if we lost the race, still adopt nothing
+    // newer — the newer worker will Adopt its own snapshot.
+    if OFFER_SEQ.load(Ordering::Acquire) == seq {
+        let _ = post(Command::Adopt(adopt));
     }
     *lock(&session.error) = None;
     Ok(())
 }
-
 fn write_text_external(text: &str) -> Result<()> {
     // Prefer wl-copy: it forks a helper that stays alive for Wayland pastes.
     // Fall back to arboard when wl-copy is missing.
@@ -1349,6 +1404,151 @@ fn read_local_image(clipboard: &mut arboard::Clipboard, sources: &[PathBuf]) -> 
     None
 }
 
+/// MIME types currently offered on the Wayland clipboard, empty on X11 / when
+/// wl-paste is missing. Used to decide text vs image primacy without guessing.
+fn wl_paste_mime_list() -> Vec<String> {
+    let Ok(output) = std::process::Command::new("wl-paste").arg("-l").output() else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| line.trim().to_string())
+        .filter(|line| !line.is_empty())
+        .collect()
+}
+
+fn mime_has_image(mimes: &[String]) -> bool {
+    mimes.iter().any(|m| {
+        let m = m.to_ascii_lowercase();
+        m.starts_with("image/")
+    })
+}
+
+fn mime_has_text(mimes: &[String]) -> bool {
+    mimes.iter().any(|m| {
+        let lower = m.to_ascii_lowercase();
+        lower.starts_with("text/")
+            || lower == "text"
+            || lower == "string"
+            || lower == "utf8_string"
+            || m == "TEXT"
+            || m == "STRING"
+            || m == "UTF8_STRING"
+    })
+}
+
+/// Cheap fingerprint so we can tell "same image as last poll" without hashing
+/// multi-megabyte DIBs on every tick.
+fn image_fingerprint(dib: &[u8]) -> (usize, u64) {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    dib.len().hash(&mut hasher);
+    let head = dib.len().min(64);
+    dib[..head].hash(&mut hasher);
+    if dib.len() > 64 {
+        dib[dib.len() - 64..].hash(&mut hasher);
+    }
+    (dib.len(), hasher.finish())
+}
+
+/// Pick a single primary local clipboard kind.
+///
+/// - Files win when present.
+/// - When the compositor MIME list is available: image-only → image, text-only
+///   → text (so a text copy after an image drops CF_DIB/PNG from FormatList).
+/// - When both MIMEs are offered (or the list is empty): prefer whichever
+///   *changed* relative to `previous`. New text + unchanged image → text
+///   (fixes "stuck on old image"). New image → image (screenshot + alt text).
+pub(super) fn decide_local_snapshot(
+    sources: Vec<PathBuf>,
+    text: Option<String>,
+    image: Option<Vec<u8>>,
+    mimes: &[String],
+    previous: &LocalSnapshot,
+) -> LocalSnapshot {
+    if !sources.is_empty() {
+        return LocalSnapshot {
+            sources,
+            ..Default::default()
+        };
+    }
+    let has_image_mime = mime_has_image(mimes);
+    let has_text_mime = mime_has_text(mimes);
+    if !mimes.is_empty() {
+        if has_image_mime && !has_text_mime {
+            if let Some(image) = image {
+                return LocalSnapshot {
+                    image: Some(image),
+                    ..Default::default()
+                };
+            }
+        }
+        if has_text_mime && !has_image_mime {
+            if let Some(text) = text {
+                return LocalSnapshot {
+                    text: Some(text),
+                    ..Default::default()
+                };
+            }
+        }
+    }
+    let text_changed = text != previous.text;
+    let image_changed = match (&image, &previous.image) {
+        (Some(now), Some(was)) => image_fingerprint(now) != image_fingerprint(was),
+        (Some(_), None) | (None, Some(_)) => true,
+        (None, None) => false,
+    };
+    if image_changed {
+        if let Some(image) = image {
+            return LocalSnapshot {
+                image: Some(image),
+                ..Default::default()
+            };
+        }
+    }
+    if text_changed {
+        if let Some(text) = text {
+            return LocalSnapshot {
+                text: Some(text),
+                ..Default::default()
+            };
+        }
+    }
+    // Nothing changed: keep the previous primary so FormatList stays stable.
+    if previous.image.is_some() {
+        if let Some(image) = image {
+            return LocalSnapshot {
+                image: Some(image),
+                ..Default::default()
+            };
+        }
+    }
+    if previous.text.is_some() {
+        if let Some(text) = text {
+            return LocalSnapshot {
+                text: Some(text),
+                ..Default::default()
+            };
+        }
+    }
+    if let Some(image) = image {
+        return LocalSnapshot {
+            image: Some(image),
+            ..Default::default()
+        };
+    }
+    if let Some(text) = text {
+        return LocalSnapshot {
+            text: Some(text),
+            ..Default::default()
+        };
+    }
+    LocalSnapshot::default()
+}
+
 fn poll_local(state: &mut State) -> Result<()> {
     if state.writing || state.sessions.is_empty() {
         return Ok(());
@@ -1382,32 +1582,21 @@ fn poll_local(state: &mut State) -> Result<()> {
                 .is_some_and(|m| path.starts_with(m.root()))
         })
         .collect::<Vec<_>>();
-    // Prefer a bitmap payload when present. File managers put a single image
-    // path on text/uri-list (no image/* offer); promote that to CF_DIB so a
-    // Mac paste into Preview/Pages gets pixels rather than a broken file offer.
-    // Screenshot tools usually offer image/png directly.
-    // File-manager copies (uri-list / gnome-copied-files) must stay file
-    // offers. Promoting a single image path to CF_DIB made Linux→Windows
-    // "copy photo.png → paste in Explorer" publish an image the shell cannot
-    // save as a file.
-    let snapshot = if !sources.is_empty() {
-        LocalSnapshot {
-            sources,
-            ..Default::default()
-        }
-    } else if let Some(dib) = read_local_image(clipboard, &[]) {
-        LocalSnapshot {
-            image: Some(dib),
-            ..Default::default()
-        }
-    } else if let Some(text) = clipboard.get_text().ok().filter(|text| !text.is_empty()) {
-        LocalSnapshot {
-            text: Some(text),
-            ..Default::default()
-        }
+    // File-manager copies (uri-list / gnome-copied-files) stay file offers —
+    // never promote a lone image path to CF_DIB (Windows Explorer cannot save
+    // that as a file). Otherwise decide text vs image by compositor MIME list
+    // and change-vs-previous so a new text copy drops a stale image offer.
+    let text = clipboard
+        .get_text()
+        .ok()
+        .filter(|text| !text.is_empty());
+    let image = if sources.is_empty() {
+        read_local_image(clipboard, &[])
     } else {
-        LocalSnapshot::default()
+        None
     };
+    let mimes = wl_paste_mime_list();
+    let snapshot = decide_local_snapshot(sources, text, image, &mimes, &state.local);
     if snapshot.text == state.local.text
         && snapshot.image == state.local.image
         && snapshot.sources == state.local.sources
@@ -1916,4 +2105,102 @@ mod file_serve_tests {
         assert_eq!(name, "hello.txt");
     }
 
+}
+
+#[cfg(test)]
+mod primacy_tests {
+    use super::*;
+
+    fn prev_image() -> LocalSnapshot {
+        LocalSnapshot {
+            image: Some(vec![1, 2, 3, 4]),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn text_only_mime_drops_stale_image() {
+        let prev = prev_image();
+        let snap = decide_local_snapshot(
+            vec![],
+            Some("hello".into()),
+            Some(vec![1, 2, 3, 4]), // image bytes still readable (stale)
+            &["text/plain".into()],
+            &prev,
+        );
+        assert_eq!(snap.text.as_deref(), Some("hello"));
+        assert!(snap.image.is_none(), "text-primary must drop image formats");
+    }
+
+    #[test]
+    fn image_only_mime_drops_stale_text() {
+        let prev = LocalSnapshot {
+            text: Some("old".into()),
+            ..Default::default()
+        };
+        let snap = decide_local_snapshot(
+            vec![],
+            Some("old".into()),
+            Some(vec![9, 9, 9]),
+            &["image/png".into()],
+            &prev,
+        );
+        assert!(snap.text.is_none());
+        assert_eq!(snap.image.as_deref(), Some(&[9, 9, 9][..]));
+    }
+
+    #[test]
+    fn both_mimes_new_text_unchanged_image_prefers_text() {
+        let prev = prev_image();
+        let snap = decide_local_snapshot(
+            vec![],
+            Some("fresh text".into()),
+            Some(vec![1, 2, 3, 4]), // same fingerprint as previous image
+            &["text/plain".into(), "image/png".into()],
+            &prev,
+        );
+        assert_eq!(snap.text.as_deref(), Some("fresh text"));
+        assert!(snap.image.is_none(), "new text must win over unchanged image");
+    }
+
+    #[test]
+    fn both_mimes_new_image_prefers_image() {
+        let prev = LocalSnapshot {
+            text: Some("alt".into()),
+            ..Default::default()
+        };
+        let snap = decide_local_snapshot(
+            vec![],
+            Some("alt".into()),
+            Some(vec![7, 7, 7, 7]),
+            &["text/plain".into(), "image/png".into()],
+            &prev,
+        );
+        assert!(snap.text.is_none());
+        assert_eq!(snap.image.as_deref(), Some(&[7, 7, 7, 7][..]));
+    }
+
+    #[test]
+    fn format_ids_text_exclusive() {
+        let snap = LocalSnapshot {
+            text: Some("x".into()),
+            image: Some(vec![1]),
+            ..Default::default()
+        };
+        let ids = snap.format_ids();
+        // Image wins when both set (defensive); poll/Adopt never leave this for text-primary.
+        assert!(ids.iter().any(|(id, _)| *id == 8), "ids={ids:?}");
+        assert!(!ids.iter().any(|(id, _)| *id == 13), "ids={ids:?}");
+    }
+
+    #[test]
+    fn format_ids_text_only() {
+        let snap = LocalSnapshot {
+            text: Some("x".into()),
+            ..Default::default()
+        };
+        let ids = snap.format_ids();
+        assert!(ids.iter().any(|(id, _)| *id == 13));
+        assert!(!ids.iter().any(|(id, _)| *id == 8));
+    }
 }
