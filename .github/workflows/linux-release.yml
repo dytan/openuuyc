@@ -156,9 +156,13 @@ jobs:
           set -euo pipefail
           NOTES="$(mktemp)"
           {
-            echo "## OpenUUYC Linux controller ${VERSION}"
+            echo "## OpenUUYC Linux ${VERSION}"
             echo
-            echo "Prebuilt **x86_64 glibc** controller (built on Ubuntu 22.04)."
+            if [[ -f packaging/linux/RELEASE-NOTES.md ]]; then
+              cat packaging/linux/RELEASE-NOTES.md
+              echo
+            fi
+            echo "Prebuilt **x86_64 glibc** build (built on Ubuntu 22.04)."
             echo
             echo "### Artifacts"
             echo "- \`${NAME}.tar.gz\` — binary + \`install.sh\` + desktop/icons"
