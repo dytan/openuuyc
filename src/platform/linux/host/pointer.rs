@@ -52,6 +52,43 @@ pub(crate) fn available() -> bool {
     socket_path().is_some()
 }
 
+/// Best-effort: turn the compositor's outputs back on via Hyprland IPC.
+///
+/// A remotely-controlled laptop has no local input, so hypridle blanks the
+/// panel (DPMS off) and wlr-screencopy then delivers no frames — the host
+/// capture warm-up times out with "尚未提供可采集的画面" and the connect fails.
+/// Waking the output at capture start (and whenever a grab comes back empty)
+/// keeps frames flowing. Never fails the caller: if the socket is gone or the
+/// compositor is not Hyprland this is a no-op and the normal path continues.
+pub(crate) fn wake_display() -> bool {
+    let Some(path) = socket_path() else {
+        return false;
+    };
+    // Newer Hyprland parses IPC through Lua (`dispatch hl.dsp.dpms("on")`);
+    // older builds take the plain `dispatch dpms on`. Try both, ignore errors.
+    let mut woke = false;
+    for cmd in [r#"dispatch hl.dsp.dpms("on")"#, "dispatch dpms on"] {
+        let Ok(mut stream) = UnixStream::connect(&path) else {
+            continue;
+        };
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(100)));
+        let _ = stream.set_write_timeout(Some(Duration::from_millis(100)));
+        if stream.write_all(cmd.as_bytes()).is_err() {
+            continue;
+        }
+        let mut reply = String::new();
+        let _ = stream.read_to_string(&mut reply);
+        if reply.trim() == "ok" {
+            woke = true;
+            break;
+        }
+    }
+    if woke {
+        tracing::info!("已通过 Hyprland IPC 唤醒显示输出 (dpms on)");
+    }
+    woke
+}
+
 /// Current global pointer position in logical (layout) coordinates, or `None`
 /// if the socket is gone or the reply did not parse.
 fn position() -> Option<(i32, i32)> {

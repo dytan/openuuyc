@@ -164,6 +164,11 @@ pub(crate) struct Desktop {
 
 impl Desktop {
     pub fn open_selected(selected: &Screen) -> Result<Self> {
+        // A remote session has no local input, so the panel may be DPMS-off and
+        // wlr-screencopy would deliver no frames. Wake it before capturing.
+        if matches!(kind(), Some(Kind::Wayland)) {
+            super::host::pointer::wake_display();
+        }
         let screen = refresh(selected)?;
         let backend = match kind() {
             Some(Kind::Wayland) => {

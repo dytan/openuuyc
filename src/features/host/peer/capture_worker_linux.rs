@@ -67,6 +67,9 @@ pub(super) fn capture_loop(
     // Zero-copy dmabuf capture tier. Lazily opened once the VA encoder exists so
     // it can share its display; None until then or after a fallback.
     let mut dmabuf_cap: Option<crate::platform::linux::host::dmabuf::DmabufCapture> = None;
+    // Throttle for re-waking a panel that hypridle blanked mid-session; without
+    // local input the compositor eventually DPMS-offs and screencopy goes empty.
+    let mut last_wake = Instant::now();
     // Publish the pointer over the cursor channel independently of video,
     // like the Windows host. While this sampler is alive the capture path
     // excludes the cursor from the frame (host::pointer::available()).
@@ -364,6 +367,10 @@ pub(super) fn capture_loop(
             }
             None => {
                 metrics.empty_captures += 1;
+                if last_wake.elapsed() > Duration::from_secs(1) {
+                    crate::platform::linux::host::pointer::wake_display();
+                    last_wake = Instant::now();
+                }
                 let Some(mut frame) = cached.clone() else {
                     continue;
                 };

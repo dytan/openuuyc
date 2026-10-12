@@ -52,11 +52,16 @@ pub(crate) fn probe(
     is_active: impl Fn() -> bool,
 ) -> Result<Vec<Capability>> {
     let mut frame = None;
-    for _ in 0..20 {
+    for attempt in 0..30 {
         ensure!(is_active(), "被控准备已取消");
         if let Some(f) = desktop.next(100, 1, false, false, (1280, 720))? {
             frame = Some(f);
             break;
+        }
+        // A DPMS-blanked panel yields no frames; wake it and keep trying so the
+        // first controller connect does not fail on an idle laptop.
+        if attempt == 2 || attempt == 10 {
+            crate::platform::linux::host::pointer::wake_display();
         }
     }
     let frame = frame.context("所选桌面尚未提供可采集的画面")?;
