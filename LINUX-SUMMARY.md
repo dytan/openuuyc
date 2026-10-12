@@ -1,5 +1,10 @@
 # Linux controller — handoff summary
 
+Historical snapshot of the controller bring-up (2026-09-25). Current status is
+[`LINUX.md`](LINUX.md) and [`LINUX-HOST.md`](LINUX-HOST.md): Linux host mode
+shipped in v0.8.0 and is not controller-only. Upstream is now
+[Farwing](https://github.com/djkcyl/farwing).
+
 Date: 2026-09-25 (Asia/Shanghai). Tested on a Linux workstation. **Do not push** until
 the collab path is agreed.
 

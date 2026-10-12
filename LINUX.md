@@ -1,10 +1,17 @@
 # OpenUUYC on Linux
 
-Status for the native Linux controller (egui + winit). This is an upstream
-collaboration track for [djkcyl/openuuyc](https://github.com/djkcyl/openuuyc),
-not a fork product. Windows cfg paths stay intact.
+Status for the native Linux port (controller and host) on this fork
+([`dytan/openuuyc`](https://github.com/dytan/openuuyc) `linux/host`). Upstream
+is now [Farwing](https://github.com/djkcyl/farwing); `djkcyl/openuuyc` resolves
+there. The app binary and UI on this branch remain OpenUUYC. Windows cfg paths
+stay intact.
 
-## What works
+Linux can view and drive a remote machine, and since **v0.8.0** it can itself
+be controlled. Host behavior, limits, and setup are in
+[`LINUX-HOST.md`](LINUX-HOST.md). Current release notes:
+[`packaging/linux/RELEASE-NOTES.md`](packaging/linux/RELEASE-NOTES.md) (v0.8.1).
+
+## What works (controller)
 
 | Area | Status |
 |------|--------|
@@ -30,11 +37,15 @@ not a fork product. Windows cfg paths stay intact.
 - Global hotkey / richer shortcut naming vs Windows hooks
 - Window icon on some Wayland compositors
 
-### Windows-ok / Linux gap (controller)
+### Windows-ok / Linux gap
+
+Host mode exists. The row below is the summary; capture backends, encode, input,
+and clipboard limits are in [`LINUX-HOST.md`](LINUX-HOST.md). Other rows are the
+controller.
 
 | Feature | Linux status |
 |---------|--------------|
-| Host / agent (本机被控) | **N/A** — Linux is controller-only by design |
+| Host / agent (本机被控) | **Works** since v0.8.0 — wlroots-family Wayland and X11 capture, VA-API or software H.264, uinput, clipboard, file receive, desktop audio. GNOME/KDE Wayland capture is not supported yet |
 | Audio playback (remote → local) | Works (cpal / ALSA) |
 | Microphone (local → remote) | Works (cpal; soak may vary by device) |
 | File transfer (dual-pane) | Works (XDG places); some Windows ACL/path checks are cfg-gated |
@@ -45,7 +56,7 @@ not a fork product. Windows cfg paths stay intact.
 | Annotation branding | **Partial** — board works; GDI brand strokes empty |
 | Multi-monitor select | Works (protocol/UI); compositor chrome polish differs |
 | Remote upgrade (official on target) | Works (API; target is Windows agent) |
-| Presence / “host room” online | Present for account presence; controllable/host agent not offered |
+| Presence / “host room” online | **Works** for the host — 允许被控 calls `set_controllable(true)` and keeps room presence as a host (device still uses the generic platform id; see LINUX-HOST.md) |
 | Gamepad passthrough | **N/A** — not implemented on either platform in this tree |
 | Screen privacy / blank host | **N/A** — not present as a client feature in this tree |
 | Low-level system-key hook | **Partial** — X11/Wayland focused-window keys only (no Win LL hook) |
@@ -71,12 +82,15 @@ not a fork product. Windows cfg paths stay intact.
 | M2 | Portable PR1 adapts (mouse, fonts, XDG) | **done** |
 | M3 | HW decode when available + software fallback | **done** (VA-API + pool fallback) |
 | M4 | Clipboard text + file (FUSE) | **done** (arboard + FUSE) |
-| M5 | Zero-copy VA↔wgpu / deeper soak | **next** |
+| M5 | Zero-copy VA↔wgpu / deeper soak | **next** (host has an experimental dmabuf encode path, off by default) |
+| M6 | Linux host (被控) | **done** in v0.8.0; v0.8.1 adds the sticky-image clipboard fix only |
 
 ## Docs
 
+- [`LINUX-HOST.md`](LINUX-HOST.md) — controlled side / host
 - [`LINUX-BUILD.md`](LINUX-BUILD.md) — distro build guides
-- [`LINUX-SUMMARY.md`](LINUX-SUMMARY.md) — handoff / commit list
+- [`LINUX-SUMMARY.md`](LINUX-SUMMARY.md) — historical controller handoff
+- [`packaging/linux/RELEASE-NOTES.md`](packaging/linux/RELEASE-NOTES.md) — v0.8.1 release notes
 - [`PR1-COMPARE.md`](PR1-COMPARE.md) — OUR tree vs DoyoDia linux-port
 - [`docs/linux-clipboard-fuse.md`](docs/linux-clipboard-fuse.md) — FUSE/clipboard audit + verify
 - [`docs/linux-lock-video-freeze.md`](docs/linux-lock-video-freeze.md) — lock UI freeze postmortem (f0067ff)
