@@ -288,7 +288,9 @@ pub(super) fn capture_loop(
         // When the dmabuf tier is live the pixels are captured zero-copy in the
         // encode step; emit a metadata-only frame so loop bookkeeping is intact
         // and the expensive shm grab+normalise is skipped entirely.
-        let use_dmabuf = zerocopy && dmabuf_cap.is_some();
+        // Only a VPP-capable hardware encoder consumes the zero-copy surface;
+        // never hand the empty synthetic texture to the software/CPU path.
+        let use_dmabuf = zerocopy && hardware && dmabuf_cap.is_some();
         let captured = if use_dmabuf {
             Ok(Some(capture::Frame {
                 width: screen.width,
@@ -440,6 +442,9 @@ pub(super) fn capture_loop(
                 }
             };
             current = Some((size, (candidate_id, wanted.color)));
+            if !hardware {
+                dmabuf_cap = None;
+            }
             frame_metadata.clear();
             encode_errors = 0;
             keyframe.store(true, Ordering::Release);
@@ -541,32 +546,20 @@ pub(super) fn capture_loop(
                         ) {
                             Ok(packets) => Ok(packets),
                             Err(error) => {
-                                tracing::warn!(%error, "ZEROCOPY VPP 编码失败，回退 CPU 缩放路径");
+                                tracing::warn!(%error, "ZEROCOPY VPP 编码失败，下一帧回退 shm/CPU");
+                                // frame.texture is the empty synthetic buffer in
+                                // dmabuf mode; disable zerocopy so the next loop
+                                // does a real shm grab, and skip this frame.
                                 zerocopy = false;
-                                active_encoder.encode_cancellable(
-                                    &frame.texture,
-                                    timestamp,
-                                    force,
-                                    &encode_cancel,
-                                )
+                                Ok(Vec::new())
                             }
                         }
                     }
-                    Ok(None) => active_encoder.encode_cancellable(
-                        &frame.texture,
-                        timestamp,
-                        force,
-                        &encode_cancel,
-                    ),
+                    Ok(None) => Ok(Vec::new()),
                     Err(error) => {
-                        tracing::warn!(%error, "ZEROCOPY 全分辨率采集失败，回退");
+                        tracing::warn!(%error, "ZEROCOPY 全分辨率采集失败，下一帧回退 shm/CPU");
                         zerocopy = false;
-                        active_encoder.encode_cancellable(
-                            &frame.texture,
-                            timestamp,
-                            force,
-                            &encode_cancel,
-                        )
+                        Ok(Vec::new())
                     }
                 },
                 }
