@@ -6,6 +6,7 @@ use serde_json::Value;
 
 pub const MAX_MESSAGE: usize = 256 * 1024;
 pub const MAX_TEXT: usize = 64 * 1024;
+pub(crate) const MAX_TOUCH_POINTS: usize = 10;
 #[derive(Clone, Copy, Serialize, Deserialize)]
 pub(crate) enum Policy {
     Windows,
@@ -81,7 +82,7 @@ pub(crate) enum KeyOrButton {
     Button(u8),
 }
 
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Point {
     pub id: u32,
     pub x: f64,
@@ -132,7 +133,7 @@ impl Event {
             }
             Self::Touch { kind, points } => {
                 ensure!(
-                    (1..=4).contains(kind) && points.len() <= 10,
+                    (1..=4).contains(kind) && points.len() <= MAX_TOUCH_POINTS,
                     "触摸类型或触点数量无效"
                 );
                 let mut ids = std::collections::BTreeSet::new();
@@ -301,38 +302,6 @@ pub(crate) fn json(bytes: &[u8]) -> Result<Option<Event>> {
     }))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::Event;
-
-    #[test]
-    fn text_input_keeps_unicode_content() {
-        let event = super::json(r#"{"action":"text_input","content":"你好"}"#.as_bytes())
-            .unwrap()
-            .unwrap();
-        assert!(matches!(event, Event::Text(text) if text == "你好"));
-    }
-
-    #[test]
-    fn ascii_key_events_stay_keys() {
-        let event = super::json(r#"{"action":"kbd_press","key":65}"#.as_bytes())
-            .unwrap()
-            .unwrap();
-        assert!(matches!(
-            event,
-            Event::Key {
-                key: 65,
-                down: true,
-                ..
-            }
-        ));
-        let text = super::json(r#"{"action":"text_input","content":"A"}"#.as_bytes())
-            .unwrap()
-            .unwrap();
-        assert!(matches!(text, Event::Text(value) if value == "A"));
-    }
-}
-
 #[derive(Clone, PartialEq, Message)]
 struct Input {
     #[prost(message, optional, tag = "1")]
@@ -369,7 +338,7 @@ pub(crate) fn touch(bytes: &[u8]) -> Result<Option<Event>> {
         return Ok(None);
     };
     ensure!(
-        (1..=4).contains(&touch.kind) && touch.points.len() <= 10,
+        (1..=4).contains(&touch.kind) && touch.points.len() <= MAX_TOUCH_POINTS,
         "触摸类型或触点数量无效"
     );
     let mut ids = std::collections::BTreeSet::new();
@@ -407,4 +376,102 @@ pub(crate) fn touch(bytes: &[u8]) -> Result<Option<Event>> {
         kind: touch.kind as u8,
         points,
     }))
+}
+
+/// The inverse of [`touch`]: one touch frame for the binary input channel.
+pub(crate) fn encode_touch(kind: u8, points: &[Point]) -> Vec<u8> {
+    Input {
+        touch: Some(Touch {
+            kind: i32::from(kind),
+            points: points
+                .iter()
+                .map(|p| TouchPoint {
+                    id: p.id,
+                    x: p.x as f32,
+                    y: p.y as f32,
+                    rx: p.radius_x as f32,
+                    ry: p.radius_y as f32,
+                    angle: p.angle as f32,
+                    pressure: p.pressure as f32,
+                })
+                .collect(),
+        }),
+    }
+    .encode_to_vec()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn text_input_keeps_unicode_content() {
+        let event = json(r#"{"action":"text_input","content":"你好"}"#.as_bytes())
+            .unwrap()
+            .unwrap();
+        assert!(matches!(event, Event::Text(text) if text == "你好"));
+    }
+
+    #[test]
+    fn ascii_key_events_stay_keys() {
+        let event = json(r#"{"action":"kbd_press","key":65}"#.as_bytes())
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            event,
+            Event::Key {
+                key: 65,
+                down: true,
+                ..
+            }
+        ));
+        let text = json(r#"{"action":"text_input","content":"A"}"#.as_bytes())
+            .unwrap()
+            .unwrap();
+        assert!(matches!(text, Event::Text(value) if value == "A"));
+    }
+
+    #[test]
+    fn touch_round_trip() {
+        let points = vec![
+            Point {
+                id: 7,
+                x: 0.25,
+                y: 0.5,
+                radius_x: 0.0,
+                radius_y: 0.0,
+                angle: 0.0,
+                pressure: 0.0,
+            },
+            Point {
+                id: 3,
+                x: 0.75,
+                y: 1.0,
+                radius_x: 12.0,
+                radius_y: 14.0,
+                angle: 90.0,
+                pressure: 0.5,
+            },
+        ];
+        for kind in 1..=4 {
+            let Event::Touch { kind: k, points: p } = touch(&encode_touch(kind, &points))
+                .expect("decodes")
+                .expect("is a touch event")
+            else {
+                panic!("expected a touch event");
+            };
+            assert_eq!((k, p), (kind, points.clone()));
+        }
+    }
+
+    #[test]
+    fn touch_lift_frame_has_no_points() {
+        let Event::Touch { kind, points } = touch(&encode_touch(3, &[]))
+            .expect("decodes")
+            .expect("is a touch event")
+        else {
+            panic!("expected a touch event");
+        };
+        assert_eq!((kind, points), (3, vec![]));
+    }
 }

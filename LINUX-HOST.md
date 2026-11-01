@@ -106,6 +106,11 @@ controller.
   synced clipboard and miss terminals and other clients that do not paste with
   Ctrl+V. Upstream's X11 answer is an XTest keysym rebind; this host does not
   have that injector, and XWayland clients ignore a custom virtual keymap.
+- Gamepad injection. `gpd_connect` / `gpd_update` / `gpd_disconnect` from a Linux
+  controller are accepted and dropped. There is no virtual gamepad.
+- Native multitouch. Touch frames from an OpenUUYC controller are followed as
+  the primary contact: pointer motion plus the left button. Extra fingers are
+  not separate contacts, and no touchscreen uinput device is created.
 - Windows system chords (Win+D, Task View, Ctrl+Alt+Del on the host).
 - Portal streams that only offer DMA-BUF (this fallback reads shared memory).
 - Confirming pointer mapping on a scaled GNOME/KDE desktop: the frame size

@@ -60,6 +60,25 @@ impl StreamControlHandle {
         Some((screen.id, screen.width, screen.height))
     }
 
+    /// Forwards one touchscreen contact. Touch frames carry no screen, so the
+    /// host places them on its current screen. A gesture is native only there,
+    /// and only when the peer is an OpenUUYC host. Everywhere else the first
+    /// contact drives the left button.
+    pub(crate) fn touch(
+        &self,
+        owner: u64,
+        phase: crate::features::remote_input::Phase,
+        id: u32,
+        pressure: f64,
+        spot: Option<crate::features::remote_input::Spot>,
+    ) -> bool {
+        let native = spot.is_some_and(|(screen, ..)| {
+            let s = lock(&self.shared);
+            s.current_screen_id == screen && s.capability.as_ref().is_some_and(|c| c.openuuyc_host)
+        });
+        self.mouse().touch(owner, phase, id, pressure, spot, native)
+    }
+
     pub(crate) fn take_mouse_restore_point(&self, track: i32) -> Option<[f64; 2]> {
         let mut s = lock(&self.shared);
         let screen = s
@@ -257,6 +276,10 @@ impl StreamControlHandle {
         }
         anyhow::ensure!(payload.len() <= 16 * 1024, "mouse command too large");
         let value: serde_json::Value = serde_json::from_slice(payload)?;
+        if let Some(vibration) = crate::protocol::gamepad::GamepadVibration::parse(&value)? {
+            self.mouse().receive_gamepad_vibration(vibration);
+            return Ok(());
+        }
         if value.get("action").and_then(|v| v.as_str()) != Some("special_game_mouse") {
             return Ok(());
         }

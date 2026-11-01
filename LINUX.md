@@ -25,6 +25,8 @@ setup are in [`LINUX-HOST.md`](LINUX-HOST.md). Current release notes:
 | Instance lock | flock under `$XDG_RUNTIME_DIR` (uid-tagged `/tmp` fallback) |
 | Places | XDG user-dirs (`user-dirs.dirs`) for Desktop/Downloads/Documents |
 | Clipboard | **arboard** text/image + **FUSE** file offer (`clipboard_files`) adapted from DoyoDia PR1. The player title bar toggles clipboard sync for the session (same per-device switch as 串流设置) |
+| Gamepad | **SDL2** standard controllers (Steam Input's virtual Xbox pad included). Rumble from `gpd_vibration`. Gamescope keeps sampling via `SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS` because this process has no SDL window. Needs `libSDL2-2.0.so.0` at runtime; without it, keys and the pointer still work |
+| Touch | winit contacts on the picture. **Native** protobuf frames when the peer is an OpenUUYC host and the contact is on that host's current screen; otherwise the first finger is the left button |
 
 ## Deferred / remaining
 
@@ -58,7 +60,8 @@ controller.
 | Multi-monitor select | Works (protocol/UI); compositor chrome polish differs |
 | Remote upgrade (official on target) | Works (API; target is Windows agent) |
 | Presence / “host room” online | **Works** for the host — 允许被控 calls `set_controllable(true)` and keeps room presence as a host (device still uses the generic platform id; see LINUX-HOST.md) |
-| Gamepad passthrough | **N/A** — not implemented on either platform in this tree |
+| Gamepad passthrough | **Controller only** — SDL2 `gpd_connect` / `gpd_update` / `gpd_disconnect` plus rumble. A Linux host accepts the messages and does not inject a virtual gamepad |
+| Touch passthrough | **Controller** sends native frames to an OpenUUYC host on the current screen (Windows host injects contacts). A Linux host follows the primary contact as pointer motion and the left button; it does not create a uinput touchscreen |
 | Screen privacy / blank host | **N/A** — not present as a client feature in this tree |
 | Low-level system-key hook | **Partial** — X11/Wayland focused-window keys only (no Win LL hook) |
 
@@ -74,6 +77,19 @@ controller.
 
 `--hardware-decode false` forces software H.264. Default is **true** (VA-API first, software fallback).
 
+## Live retest (controller pad and phone touch)
+
+`cargo test` covers the wire without a device: Xbox button bits, stick coordinates, rumble strength scaling, connect/update/disconnect coalescing, and touch frames (native protobuf and the left-button fallback). SDL itself is loaded with `dlopen` and is not required for those tests.
+
+On a machine with a controller and, for touch, a touchscreen:
+
+1. Install the distro SDL2 runtime (`sdl2` on Arch, `libsdl2-2.0-0` on Debian/Ubuntu) if it is not already present. SteamOS Game Mode ships it. A missing library logs `game controller sampling unavailable` and retries; mouse and keyboard are unchanged.
+2. Build this checkout and start the GUI. Connect to a Windows OpenUUYC host and to a Linux host, with 键鼠控制 on.
+3. Focus the viewer on the host's current screen. Press a face button and move a stick. The Windows host should see an XInput-style pad. The Linux host will not: it does not create a virtual gamepad. Disconnecting or unfocusing the viewer must release the pad (neutral update, then `gpd_disconnect`) and stop rumble.
+4. Rumble: a game that vibrates the pad should pulse the local motors while the viewer owns input. Controllers without rumble log once and keep sending buttons.
+5. Touch the picture with one finger, then two. On a Windows OpenUUYC host the contacts should arrive as touch. On a Linux host the first finger should move and click; extra fingers should not each click. A touch that starts on the title bar or a menu stays local. Leaving the window lifts the remote contact.
+6. Repeat touch against a host that is not OpenUUYC (no `openuuyc_sdr_10bit`). The first finger should be the left button, not a native touch frame.
+
 ## Milestones
 
 | ID | Goal | Status |
@@ -85,6 +101,7 @@ controller.
 | M4 | Clipboard text + file (FUSE) | **done** (arboard + FUSE) |
 | M5 | Zero-copy VA↔wgpu / deeper soak | **next** (host has an experimental dmabuf encode path, off by default) |
 | M6 | Linux host (被控) | **done** in v0.8.0; v0.8.1 adds the sticky-image clipboard fix only |
+| M7 | Controller gamepad + touch | **done** for the viewer (SDL2 pad/rumble/Gamescope hint, native touch frames). Linux host gamepad injection and uinput multitouch are still open |
 
 ## Docs
 
