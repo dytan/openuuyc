@@ -4,8 +4,13 @@
 //! Linux the GUI already owns the session, so we drive `features::clipboard`
 //! directly: TEXT-channel packets feed the protocol, and an OleDrop/AutoSave
 //! FormatList is turned into a write under the user's Downloads folder by
-//! `native_linux` (see `Command::Offer`).
+//! `native_linux` (see `Command::Offer`). A controller that negotiates native
+//! drag (`openuuyc_drag_drop`) is answered by [`drag_sink`]; the files land in
+//! that same Downloads folder.
 use crate::features::clipboard::Clipboard;
+
+#[path = "drag_sink.rs"]
+mod drag_sink;
 use crate::protocol::peer_platform::PeerPlatform;
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
@@ -54,6 +59,9 @@ struct Shared {
     sender: Option<mpsc::Sender<Vec<u8>>>,
     receiver: Option<mpsc::Receiver<Vec<u8>>>,
     official_drop: Option<crate::account::feature_ability::FeatureCatalog>,
+    /// Controller advertised `openuuyc_drag_drop` for this connection.
+    wants_native: bool,
+    file: std::sync::Weak<webrtc::data_channel::RTCDataChannel>,
 }
 
 #[derive(Clone)]
@@ -67,6 +75,8 @@ impl Default for Receiver {
             sender: None,
             receiver: None,
             official_drop: None,
+            wants_native: false,
+            file: std::sync::Weak::new(),
         })))
     }
 }
@@ -79,11 +89,28 @@ impl Receiver {
     pub fn official_drop(&self, catalog: Option<crate::account::feature_ability::FeatureCatalog>) {
         lock(&self.0).official_drop = catalog;
     }
-    pub fn native(&self, _enabled: bool) {}
-    pub fn bind_file(&self, _channel: &Arc<RTCDataChannel>) {}
-    pub fn close_file(&self, _channel: &Arc<RTCDataChannel>) {}
-    pub fn receive_file(&self, _channel: &Arc<RTCDataChannel>, _bytes: &[u8]) -> Result<()> {
-        // Native OLE drag FILE channel is Windows-only; official drop uses TEXT.
+    pub fn native(&self, enabled: bool) {
+        lock(&self.0).wants_native = enabled;
+    }
+    pub fn bind_file(&self, channel: &Arc<RTCDataChannel>) {
+        lock(&self.0).file = Arc::downgrade(channel);
+    }
+    pub fn close_file(&self, channel: &Arc<RTCDataChannel>) {
+        let mut state = lock(&self.0);
+        if state.file.ptr_eq(&Arc::downgrade(channel)) {
+            state.file = std::sync::Weak::new();
+        }
+    }
+    pub fn receive_file(&self, channel: &Arc<RTCDataChannel>, bytes: &[u8]) -> Result<()> {
+        let state = lock(&self.0);
+        if !state.file.ptr_eq(&Arc::downgrade(channel)) {
+            return Ok(());
+        }
+        if let Some(sender) = state.sender.as_ref() {
+            sender
+                .try_send(bytes.to_vec())
+                .map_err(|_| anyhow::anyhow!("拖放接收队列已满"))?;
+        }
         Ok(())
     }
     pub fn bind(&self, channel: u16) -> u64 {
@@ -133,7 +160,7 @@ pub(super) async fn run(
     cancel: CancellationToken,
     platform: PeerPlatform,
     _input: super::input::Receiver,
-    _screens: impl Fn() -> (Vec<crate::media::capture::Screen>, bool) + Send + Sync + 'static,
+    screens: impl Fn() -> (Vec<crate::media::capture::Screen>, bool) + Send + Sync + 'static,
 ) {
     let mut tick = tokio::time::interval(Duration::from_millis(100));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -152,6 +179,7 @@ pub(super) async fn run(
                 &cancel,
                 platform,
                 channel,
+                &screens,
             )
             .await
             {
@@ -196,6 +224,7 @@ async fn binding(
     cancel: &CancellationToken,
     platform: PeerPlatform,
     channel: Arc<RTCDataChannel>,
+    screens: &impl Fn() -> (Vec<crate::media::capture::Screen>, bool),
 ) -> Result<()> {
     let (generation, mut rx) = {
         let mut state = lock(&receiver.0);
@@ -239,6 +268,10 @@ async fn binding(
     let mut permission: Option<bool> = None;
     let mut tick = tokio::time::interval(Duration::from_millis(100));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let (clip_tx, mut clip_rx) = mpsc::channel(32);
+    let (done_tx, mut done_rx) = mpsc::channel(4);
+    let token = (uuid::Uuid::new_v4().as_u128() as u64).max(1);
+    let mut sink = drag_sink::Sink::new(token, clip_tx, done_tx);
 
     let result = async {
         loop {
@@ -282,6 +315,20 @@ async fn binding(
                 error: snap.error,
                 dragging: clipboard.dragging(),
             });
+            let (_, viewing) = screens();
+            let file_open = lock(&receiver.0).file.upgrade().is_some_and(|channel| {
+                channel.ready_state()
+                    == webrtc::data_channel::data_channel_state::RTCDataChannelState::Open
+            });
+            sink.set_ready(
+                lock(&receiver.0).wants_native
+                    && viewing
+                    && files
+                    && lease.file_access()
+                    && file_open,
+            );
+            let file = lock(&receiver.0).file.clone();
+            flush_drag(&mut sink, &channel, &file).await;
 
             tokio::select! {
                 _ = stop.cancelled() => break,
@@ -292,13 +339,29 @@ async fn binding(
                 message = rx.recv() => {
                     let Some(message) = message else { break; };
                     if crate::protocol::drag_drop::is_packet(&message) {
-                        // Native drag is Windows-only; ignore.
-                        continue;
+                        if let Err(error) = sink.push(&message) {
+                            tracing::warn!(error = format!("{error:#}"), "native drag packet rejected");
+                        }
+                    } else {
+                        tracing::debug!(bytes = message.len(), "host clipboard packet");
+                        if let Err(error) = clipboard.receive(&message) {
+                            tracing::warn!(error = format!("{error:#}"), "处理远端剪贴板消息失败");
+                        }
                     }
-                    tracing::debug!(bytes = message.len(), "host clipboard packet");
-                    if let Err(error) = clipboard.receive(&message) {
-                        tracing::warn!(error = format!("{error:#}"), "处理远端剪贴板消息失败");
-                    }
+                    let file = lock(&receiver.0).file.clone();
+                    flush_drag(&mut sink, &channel, &file).await;
+                }
+                packet = clip_rx.recv() => {
+                    let Some(packet) = packet else { break; };
+                    sink.wrap_clipboard(packet);
+                    let file = lock(&receiver.0).file.clone();
+                    flush_drag(&mut sink, &channel, &file).await;
+                }
+                done = done_rx.recv() => {
+                    let Some((id, result)) = done else { break; };
+                    sink.on_done(id, result);
+                    let file = lock(&receiver.0).file.clone();
+                    flush_drag(&mut sink, &channel, &file).await;
                 }
                 packet = out_rx.recv() => {
                     let Some(packet) = packet else { break; };
@@ -316,4 +379,29 @@ async fn binding(
     sender_task.abort();
     let _ = sender_task.await;
     result
+}
+
+async fn flush_drag(
+    sink: &mut drag_sink::Sink,
+    text: &Arc<RTCDataChannel>,
+    file: &std::sync::Weak<RTCDataChannel>,
+) {
+    for frame in sink.drain() {
+        let sent = if frame.bulk {
+            match file.upgrade() {
+                Some(channel) => channel
+                    .send(&bytes::Bytes::from(frame.data))
+                    .await
+                    .map_err(|error| error.to_string()),
+                None => Err("拖放文件通道已关闭".into()),
+            }
+        } else {
+            text.send_text_bytes(&bytes::Bytes::from(frame.data))
+                .await
+                .map_err(|error| error.to_string())
+        };
+        if let Err(error) = sent {
+            tracing::warn!(%error, "native drag send failed");
+        }
+    }
 }

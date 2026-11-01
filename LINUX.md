@@ -46,12 +46,12 @@ controller.
 
 | Feature | Linux status |
 |---------|--------------|
-| Host / agent (本机被控) | **Works** since v0.8.0 — wlroots-family Wayland and X11 capture, VA-API or software H.264, uinput, clipboard, file receive, desktop audio. GNOME/KDE Wayland capture is not supported yet |
+| Host / agent (本机被控) | **Works** since v0.8.0 — wlroots-family Wayland and X11 capture, VA-API or software H.264, uinput, clipboard, file receive (Send and viewer drag-drop → `~/Downloads`), desktop audio. GNOME/KDE Wayland capture is not supported yet |
 | Audio playback (remote → local) | Works (cpal / ALSA) |
 | Microphone (local → remote) | Works (cpal; soak may vary by device) |
 | File transfer (dual-pane) | Works (XDG places); some Windows ACL/path checks are cfg-gated |
 | Clipboard text/image | Works (arboard) |
-| Clipboard files | **Partial** — controller FUSE offer (no AutoUnmount). Host → controller file paste serves `FileGroupDescriptorW` plus contents (task 0, Unix-second protobuf times); live Windows paste still needs a retest. See [`LINUX-HOST.md`](LINUX-HOST.md) |
+| Clipboard files | **Partial** — controller FUSE offer (no AutoUnmount). Host → controller file paste serves `FileGroupDescriptorW` plus contents (task 0, Unix-second protobuf times); live Windows paste still needs a retest. Dragging a file onto the Linux host saves it under `~/Downloads`. See [`LINUX-HOST.md`](LINUX-HOST.md) |
 | HW decode | **Partial** — VA-API H.264 + HEVC Main; Main10 missing; no dmabuf zero-copy (vs DXVA) |
 | Plugins / node graph | **Missing** — stub host |
 | Annotation branding | **Partial** — board works; GDI brand strokes empty |

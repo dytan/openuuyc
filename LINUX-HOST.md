@@ -55,6 +55,11 @@ controller.
   has not been pasted against a live Windows controller in CI.
 - **Host-side file receive.** Files sent from the controller land in `~/Downloads`
   (name collisions are resolved) via the file-transfer **Send** path.
+- **Viewer file drop.** Dragging a file from a controller onto the session also
+  lands in `~/Downloads` (same folder as Send, with a desktop notification when
+  the session can show one). Controllers that negotiate native drag are answered
+  on that channel; a clipboard OleDrop is saved the same way. The file is not
+  placed under the pointer. Dragging files *out* of the Linux host is not offered.
 - **Desktop audio.** Captured from the default sink monitor through `parec`
   (PulseAudio / PipeWire-pulse).
 - **Zero-copy GPU capture (experimental, opt-in).** `OPENUUYC_ZEROCOPY=1` enables
@@ -63,9 +68,6 @@ controller.
 
 ## Not done yet (gracefully degraded)
 
-- **Viewer drag-drop onto the video window** (controller → Linux host) does not
-  write files yet — the OleDrop path is not wired. Use the file-transfer **Send**
-  button instead; that works.
 - Virtual / headless displays, resolution & DPI changes, multi-monitor topology
   journaling (physical outputs only).
 - Remote microphone playback into the host (accepted on the wire, dropped).
@@ -125,7 +127,11 @@ asking a controller to connect.
    arrives on the host (`~/Downloads` via Send, or a clipboard file offer).
    Then copy text and an image each way so the sticky-image fix still holds:
    an image followed by text must paste as text.
-6. Toggle *允许被控* off and confirm the controller is dropped.
+6. **File drop.** From the controller, drag a small file onto the remote session
+   (the video window). It should appear in the host's `~/Downloads`. Then use
+   file-transfer **Send** with another small file and confirm that path still
+   writes to `~/Downloads` as well.
+7. Toggle *允许被控* off and confirm the controller is dropped.
 
 ## Caveat: device platform id
 
@@ -137,8 +143,9 @@ by the connection test above.
 
 ## v0.8.1
 
-Functional host features in this document are unchanged from v0.8.0 aside from
-one clipboard fix. Release notes:
+Functional host features in the v0.8.1 release are unchanged from v0.8.0 aside
+from one clipboard fix. Viewer file drop, described under What works, landed
+after that tag. Release notes:
 [`packaging/linux/RELEASE-NOTES.md`](packaging/linux/RELEASE-NOTES.md).
 
 - **Sticky-image clipboard** (`0b9cfad`). After an image sync, a later text copy
@@ -176,7 +183,8 @@ laptops and the zero-copy path.
   screens and VPP/dmabuf errors, but has not had wide soak time; keep it off for
   routine use and opt in only to test. Leave it off if you see quality dips or
   stalls.
-- Viewer drag-drop onto the video window does not write files yet (use **Send**).
+- Viewer file drop saves into `~/Downloads`, not at the pointer on the desktop.
+  Drag-out from the Linux host is not offered.
 - Linux → controller file clipboard is partial (text/images reliable).
 - GNOME/KDE Wayland capture still needs the ScreenCast portal.
 - The device still registers with the generic (Windows) platform id; see the

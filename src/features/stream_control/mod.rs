@@ -669,6 +669,23 @@ impl StreamControlHandle {
         );
         self.clipboard.drop_files(paths, point)
     }
+    /// Clipboard file drop without the account feature-map check.
+    ///
+    /// `remote_clipboard_v5` in the embedded map starts at version 4.20.0.
+    /// This build reports engine `1.0.0-rc.2`, so a Linux viewer aimed at a
+    /// Linux host would otherwise refuse the gesture even though the host
+    /// accepts OleDrop and writes Downloads. File clipboard still has to be on.
+    pub(crate) fn drop_files_unadvertised(
+        &self,
+        paths: Vec<std::path::PathBuf>,
+        point: crate::protocol::drag_drop::Point,
+    ) -> Result<Arc<crate::features::clipboard::drag::Submission>> {
+        anyhow::ensure!(
+            self.clipboard.drop_available(),
+            "需要开启文件剪贴板与远端控制，且上次拖放已被接收"
+        );
+        self.clipboard.drop_files(paths, point)
+    }
     pub(crate) fn drag_drop(&self) -> &crate::features::drag_drop::controller::Controller {
         &self.drag_drop
     }
