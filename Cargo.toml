@@ -155,6 +155,8 @@ x11rb = "0.13"
 pollster = "0.4"
 display-info = "0.5.9"
 # Linux host (controlled side): wlroots screencopy capture, virtual input.
+# ScreenCast portal is the GNOME/KDE fallback. PipeWire itself is dlopen'd.
+ashpd = { version = "0.13.13", default-features = false, features = ["async-io", "screencast"] }
 wayland-client = "0.31"
 wayland-protocols = { version = "0.32", default-features = false, features = ["client", "unstable"] }
 wayland-protocols-wlr = { version = "0.3", default-features = false, features = ["client"] }

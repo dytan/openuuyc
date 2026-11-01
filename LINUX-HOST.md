@@ -12,14 +12,31 @@ controller.
   like Windows. (The device is registered with the generic platform id; see the
   caveat below.)
 - **Screen capture.**
-  - Wayland: `zwlr_screencopy_v1` into shared memory. Works on wlroots-family
-    compositors (Hyprland, Sway, river, labwc, Wayfire).
-  - X11: `GetImage` on the root window.
-  - GNOME/KDE Wayland are **not** supported yet (they need the ScreenCast
-    portal; see below).
+  - Wayland, wlroots-family (Hyprland, Sway, river, labwc, Wayfire):
+    `zwlr_screencopy_v1` into shared memory. This stays the default whenever
+    the compositor offers the protocol. The portal is not opened.
+  - Wayland without that protocol (GNOME, KDE): XDG ScreenCast portal, frames
+    read from PipeWire shared memory. KDE buffers that arrive as an unmapped
+    MemFd are mapped for the copy. DMA-BUF is not imported; negotiation asks
+    only for MemPtr/MemFd.
+  - X11: `GetImage` on the root window. Unchanged. The portal is not an
+    automatic fallback on Xorg.
+  - Override with `OPENUUYC_CAPTURE` (comma-separated, first usable wins):
+    `wlr`, `portal`, `x11`. Examples: `portal` forces the portal even on
+    Hyprland; `wlr,portal` tries screencopy and then the portal; `wlr` alone
+    fails on GNOME/KDE instead of switching. Unset keeps the default above.
+  - **Portal permission.** The first `Start` shows the desktop's screen-share
+    dialog. Someone at the machine has to allow the monitor; a remote session
+    cannot click that dialog. The portal is asked to persist the grant until
+    it is explicitly revoked, and the restore token is stored in the app data
+    directory (`$XDG_DATA_HOME/openuuyc/screencast-restore-token`, or
+    `~/.local/share/openuuyc/screencast-restore-token` when `XDG_DATA_HOME` is
+    unset). Later starts pass the token back and should not ask again until
+    the user revokes the share in the desktop's privacy settings.
   - A DPMS-blanked panel (idle laptop with no local input) is woken on connect
     via compositor IPC on Hyprland, so a remote session never stalls on a black
-    screen. Best-effort elsewhere.
+    screen. Best-effort elsewhere. That wake still runs if Hyprland is told to
+    use the portal.
 - **Encode.**
   - **VA-API hardware H.264** (Intel/AMD/anything with a working libva driver),
     selected automatically after an encode→decode round-trip validates on the
@@ -90,7 +107,10 @@ controller.
   Ctrl+V. Upstream's X11 answer is an XTest keysym rebind; this host does not
   have that injector, and XWayland clients ignore a custom virtual keymap.
 - Windows system chords (Win+D, Task View, Ctrl+Alt+Del on the host).
-- GNOME/KDE Wayland capture (portal ScreenCast).
+- Portal streams that only offer DMA-BUF (this fallback reads shared memory).
+- Confirming pointer mapping on a scaled GNOME/KDE desktop: the frame size
+  follows the portal stream and can differ from the `wl_output` mode. The
+  host updates the published size when the first frame disagrees.
 
 ## Required setup for input injection
 
@@ -121,7 +141,10 @@ Screen capture and audio need no root.
 
 Enumerates outputs, captures a frame, encodes → decodes it, probes
 `/dev/uinput`, and reports whether `zwp_virtual_keyboard_manager_v1` is
-advertised. Use it to confirm the local half before asking a controller to
+advertised. The report names the capture order (`wlr-screencopy`,
+`portal-screencast`, or `X11`). On a portal session with no restore token
+yet, it warns that the desktop will show a share dialog before the first
+frame. Use it to confirm the local half before asking a controller to
 connect.
 
 ## Connection test plan (needs a second device)
@@ -160,11 +183,39 @@ controllable; whether the server fully honours a non-Windows host, and whether a
 controller interoperates with this H.264 stream and input, can only be confirmed
 by the connection test above.
 
+## Live retest (GNOME and KDE)
+
+A headless build machine cannot open a GNOME or KDE session. On a computer
+logged into that desktop, with `xdg-desktop-portal` (and the GNOME or KDE
+backend) and PipeWire installed:
+
+1. Leave `OPENUUYC_CAPTURE` unset. Confirm the compositor does not advertise
+   `zwlr_screencopy_manager_v1`.
+2. Run `OpenUUYC host-selftest`. The first run should show the screen-share
+   dialog. Share a monitor. The report should say `portal-screencast` and a
+   non-empty frame. A restore token file appears in the app data directory
+   (see above).
+3. Run `host-selftest` again. It should capture without asking.
+4. From a controller: video, mouse, keys, and (if enabled) desktop audio.
+   On a scaled display, check that clicks land on the picture.
+5. Revoke the share in the desktop's privacy settings and confirm the next
+   start asks again.
+6. If the report says buffers were delivered but could not be read, and the
+   reason mentions DMA-BUF, that desktop refused shared memory. That case is
+   still unsupported.
+
+Hyprland (or another wlroots compositor): leave `OPENUUYC_CAPTURE` unset.
+`host-selftest` must still report `wlr-screencopy`, with DPMS wake and the
+separate cursor channel unchanged. `OPENUUYC_CAPTURE=portal` is the opt-in
+to try the portal there. Leave `OPENUUYC_ZEROCOPY` unset; the experimental
+dmabuf path stays wlr-only and off by default.
+
 ## v0.8.1
 
-Functional host features in the v0.8.1 release are unchanged from v0.8.0 aside
-from one clipboard fix. Viewer file drop, described under What works, landed
-after that tag. Release notes:
+The notes in this section are the v0.8.1 release. Functional host features in
+that release are unchanged from v0.8.0 aside from one clipboard fix. Viewer
+file drop and the ScreenCast portal fallback, both described under **What
+works**, landed after that tag. Release notes:
 [`packaging/linux/RELEASE-NOTES.md`](packaging/linux/RELEASE-NOTES.md).
 
 - **Sticky-image clipboard** (`0b9cfad`). After an image sync, a later text copy
@@ -205,7 +256,9 @@ laptops and the zero-copy path.
 - Viewer file drop saves into `~/Downloads`, not at the pointer on the desktop.
   Drag-out from the Linux host is not offered.
 - Linux → controller file clipboard is partial (text/images reliable).
-- GNOME/KDE Wayland capture still needs the ScreenCast portal.
+- GNOME/KDE Wayland capture needed the ScreenCast portal at v0.8.0. That
+  fallback is now implemented (shared memory / KDE MemFd); DMA-BUF-only
+  streams are still unsupported. See **What works**.
 - The device still registers with the generic (Windows) platform id; see the
   caveat below.
 

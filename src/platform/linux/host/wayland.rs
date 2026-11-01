@@ -6,8 +6,9 @@
 //! the VPP source surface (cros-libva already exposes ExternalBufferDescriptor
 //! / MemoryType::DrmPrime2). Keep that path behind the same env var with shm
 //! fallback so the live stream never regresses.
-//! inventory. Hyprland, Sway, river, labwc and Wayfire implement it; GNOME and
-//! KDE need the ScreenCast portal instead, which is not wired up yet.
+//! inventory. Hyprland, Sway, river, labwc and Wayfire implement it. GNOME and
+//! KDE do not; those sessions use the ScreenCast portal in `host::portal`
+//! when this protocol is missing.
 use anyhow::{Context, Result, bail, ensure};
 use std::os::fd::{AsFd, FromRawFd, OwnedFd};
 use std::time::{Duration, Instant};
@@ -357,7 +358,7 @@ impl Screencopy {
         let qh = queue.handle();
         let manager = globals
             .bind::<ZwlrScreencopyManagerV1, _, _>(&qh, 1..=3, ())
-            .context("合成器不支持 wlr-screencopy（GNOME/KDE 需要 ScreenCast 门户，暂未支持）")?;
+            .context("合成器不支持 wlr-screencopy")?;
         let shm = globals
             .bind::<wl_shm::WlShm, _, _>(&qh, 1..=1, ())
             .context("合成器缺少 wl_shm")?;

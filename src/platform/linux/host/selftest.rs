@@ -15,6 +15,14 @@ pub fn run(bench: Option<u32>) -> Result<String> {
 
     line!("OpenUUYC Linux 被控自检");
     line!("会话类型: {:?}", capture::kind());
+    line!("采集顺序: {}", capture::describe_order());
+    if capture::portal_needs_consent() {
+        line!(
+            "门户授权: 尚未保存恢复令牌。打开采集时本机会弹出屏幕共享对话框，需要有人在这台机器上同意一次。"
+        );
+    } else if matches!(capture::kind(), Some(capture::Kind::Portal)) {
+        line!("门户授权: 已有恢复令牌，预期不再弹出对话框。");
+    }
     if let Some(reason) = capture::unavailable_reason() {
         line!("采集不可用: {reason}");
     }
@@ -57,7 +65,10 @@ pub fn run(bench: Option<u32>) -> Result<String> {
             break;
         }
     }
-    let frame = frame.context("5 秒内未取得画面")?;
+    let frame = frame.with_context(|| match desktop.capture_stage() {
+        Some(stage) => format!("5 秒内未取得画面（{stage}）"),
+        None => "5 秒内未取得画面".to_owned(),
+    })?;
     line!(
         "采集成功: {}x{}, {} 字节, 用时 {} ms",
         frame.width,
@@ -183,7 +194,7 @@ pub fn run(bench: Option<u32>) -> Result<String> {
         let mut en = encode_ms.clone();
         let mut fr = frame_ms.clone();
         line!("  采集帧数: {captured_frames}  码流: {} KB  实现={implementation}", bytes_total / 1024);
-        line!("  screencopy 抓帧: p50 {:.1} ms  p95 {:.1} ms", pct(&mut g, 0.50), pct(&mut g, 0.95));
+        line!("  抓帧: p50 {:.1} ms  p95 {:.1} ms", pct(&mut g, 0.50), pct(&mut g, 0.95));
         line!("  缩放/转换:      p50 {:.1} ms  p95 {:.1} ms", pct(&mut sc, 0.50), pct(&mut sc, 0.95));
         line!("  编码:           p50 {:.1} ms  p95 {:.1} ms", pct(&mut en, 0.50), pct(&mut en, 0.95));
         line!("  单帧串行合计:   p50 {:.1} ms  p95 {:.1} ms", pct(&mut fr, 0.50), pct(&mut fr, 0.95));
@@ -276,7 +287,7 @@ pub fn run(bench: Option<u32>) -> Result<String> {
                     }
                 }
                 line!("  码流: {} KB", va_bytes / 1024);
-                line!("  screencopy 抓帧: p50 {:.1} ms  p95 {:.1} ms", pct(&mut va_grab.clone(), 0.50), pct(&mut va_grab.clone(), 0.95));
+                line!("  抓帧: p50 {:.1} ms  p95 {:.1} ms", pct(&mut va_grab.clone(), 0.50), pct(&mut va_grab.clone(), 0.95));
                 line!("  缩放:            p50 {:.1} ms  p95 {:.1} ms", pct(&mut va_scale.clone(), 0.50), pct(&mut va_scale.clone(), 0.95));
                 line!("  转换+上传+编码:  p50 {:.1} ms  p95 {:.1} ms", pct(&mut va_enc.clone(), 0.50), pct(&mut va_enc.clone(), 0.95));
                 let fps = va_frames as f64 / elapsed.as_secs_f64();
@@ -391,7 +402,7 @@ pub fn run(bench: Option<u32>) -> Result<String> {
                             }
                         }
                         line!("  码流: {} KB", vp_bytes / 1024);
-                        line!("  screencopy 抓帧:   p50 {:.1} ms  p95 {:.1} ms", pct(&mut vp_grab.clone(), 0.50), pct(&mut vp_grab.clone(), 0.95));
+                        line!("  抓帧:   p50 {:.1} ms  p95 {:.1} ms", pct(&mut vp_grab.clone(), 0.50), pct(&mut vp_grab.clone(), 0.95));
                         line!("  CPU 归一化(全幅):  p50 {:.1} ms  p95 {:.1} ms", pct(&mut vp_norm.clone(), 0.50), pct(&mut vp_norm.clone(), 0.95));
                         line!("  上传+VPP+编码:     p50 {:.1} ms  p95 {:.1} ms", pct(&mut vp_enc.clone(), 0.50), pct(&mut vp_enc.clone(), 0.95));
                         let fps = vp_frames as f64 / elapsed.as_secs_f64();
