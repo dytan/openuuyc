@@ -1,9 +1,14 @@
-//! Linux controlled-side input injection via uinput. Absolute coordinates use
-//! the full compositor layout bounding box; evdev is layout-unaware, so Unicode
-//! text falls back to US-layout ASCII (other characters are reported).
+//! Linux controlled-side input injection.
+//!
+//! Pointer, buttons, wheel and key events go through `uinput`, as do printable
+//! US-ASCII `text_input` commits, so an ASCII session keeps the path that
+//! already works. A commit that contains any other character is injected with
+//! `zwp_virtual_keyboard_v1` when the compositor offers it. Without that
+//! protocol the ASCII subset still uses `uinput` and the other characters are
+//! skipped. Absolute coordinates use the full compositor layout bounding box.
 #![allow(dead_code)]
 use super::wire::{Event, KeyOrButton};
-use crate::platform::linux::host::{input::Uinput, keymap};
+use crate::platform::linux::host::{input::Uinput, keymap, virtual_keyboard};
 use anyhow::{Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -78,6 +83,7 @@ pub(crate) struct Engine {
     buttons: BTreeSet<u16>,
     geometry: Geometry,
     unsupported_text: bool,
+    virtual_keyboard: Option<virtual_keyboard::Keyboard>,
 }
 impl Engine {
     pub fn new(
@@ -95,6 +101,7 @@ impl Engine {
             buttons: BTreeSet::new(),
             geometry: Geometry::default(),
             unsupported_text: false,
+            virtual_keyboard: virtual_keyboard::Keyboard::connect_optional(),
         })
     }
     pub fn backend(&self) -> &'static str {
@@ -115,7 +122,9 @@ impl Engine {
         Ok(())
     }
     fn device(&mut self) -> Result<&mut Uinput> {
-        self.device.as_mut().ok_or_else(|| anyhow::anyhow!("uinput 设备未就绪"))
+        self.device
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("uinput 设备未就绪"))
     }
     fn key(&mut self, vk: u16, down: bool) -> Result<()> {
         let Some(code) = keymap::evdev(vk) else {
@@ -155,8 +164,44 @@ impl Engine {
         self.device()?
             .move_abs((px - bounds.0 as f64) / bw, (py - bounds.1 as f64) / bh)
     }
-    fn text(&mut self, text: &str) -> Result<()> {
+    fn text(&mut self, text: &str, permitted: &dyn Fn() -> bool) -> Result<()> {
+        if virtual_keyboard::needs_layout_independent_text(text) {
+            if let Some(keyboard) = self.virtual_keyboard.as_mut() {
+                match keyboard.commit(text, permitted) {
+                    virtual_keyboard::Commit::Done => return Ok(()),
+                    virtual_keyboard::Commit::Failed {
+                        committed: true,
+                        error,
+                    } => {
+                        tracing::warn!(
+                            %error,
+                            "virtual keyboard text interrupted; not replaying through uinput"
+                        );
+                        return Ok(());
+                    }
+                    virtual_keyboard::Commit::Failed {
+                        committed: false,
+                        error,
+                    } => {
+                        tracing::warn!(
+                            %error,
+                            "virtual keyboard text failed; falling back to US-ASCII uinput"
+                        );
+                        self.unsupported_text = true;
+                    }
+                }
+            } else if !self.unsupported_text {
+                self.unsupported_text = true;
+                tracing::warn!("non-ASCII text skipped: zwp_virtual_keyboard_v1 is not available");
+            }
+        }
+        self.type_ascii(text, permitted)
+    }
+    fn type_ascii(&mut self, text: &str, permitted: &dyn Fn() -> bool) -> Result<()> {
         for ch in text.chars() {
+            if !permitted() {
+                return Ok(());
+            }
             let Some((code, shift)) = keymap::ascii(ch) else {
                 if !self.unsupported_text {
                     self.unsupported_text = true;
@@ -220,7 +265,7 @@ impl Engine {
                     self.device()?.wheel(horizontal, detents, hi_res)?;
                 }
             }
-            Event::Text(text) => self.text(&text)?,
+            Event::Text(text) => self.text(&text, &permitted)?,
             Event::Combination { down, keys } => {
                 for item in keys {
                     ensure!(permitted(), "组合输入已取消");
