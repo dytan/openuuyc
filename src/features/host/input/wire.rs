@@ -302,38 +302,6 @@ pub(crate) fn json(bytes: &[u8]) -> Result<Option<Event>> {
     }))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::Event;
-
-    #[test]
-    fn text_input_keeps_unicode_content() {
-        let event = super::json(r#"{"action":"text_input","content":"你好"}"#.as_bytes())
-            .unwrap()
-            .unwrap();
-        assert!(matches!(event, Event::Text(text) if text == "你好"));
-    }
-
-    #[test]
-    fn ascii_key_events_stay_keys() {
-        let event = super::json(r#"{"action":"kbd_press","key":65}"#.as_bytes())
-            .unwrap()
-            .unwrap();
-        assert!(matches!(
-            event,
-            Event::Key {
-                key: 65,
-                down: true,
-                ..
-            }
-        ));
-        let text = super::json(r#"{"action":"text_input","content":"A"}"#.as_bytes())
-            .unwrap()
-            .unwrap();
-        assert!(matches!(text, Event::Text(value) if value == "A"));
-    }
-}
-
 #[derive(Clone, PartialEq, Message)]
 struct Input {
     #[prost(message, optional, tag = "1")]
@@ -435,6 +403,33 @@ pub(crate) fn encode_touch(kind: u8, points: &[Point]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_input_keeps_unicode_content() {
+        let event = json(r#"{"action":"text_input","content":"你好"}"#.as_bytes())
+            .unwrap()
+            .unwrap();
+        assert!(matches!(event, Event::Text(text) if text == "你好"));
+    }
+
+    #[test]
+    fn ascii_key_events_stay_keys() {
+        let event = json(r#"{"action":"kbd_press","key":65}"#.as_bytes())
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            event,
+            Event::Key {
+                key: 65,
+                down: true,
+                ..
+            }
+        ));
+        let text = json(r#"{"action":"text_input","content":"A"}"#.as_bytes())
+            .unwrap()
+            .unwrap();
+        assert!(matches!(text, Event::Text(value) if value == "A"));
+    }
 
     #[test]
     fn touch_round_trip() {
