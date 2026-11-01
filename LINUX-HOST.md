@@ -24,6 +24,14 @@ controller.
   - **VA-API hardware H.264** (Intel/AMD/anything with a working libva driver),
     selected automatically after an encode→decode round-trip validates on the
     machine. Low-latency rate control fills the negotiated bitrate.
+  - The uploaded picture is never the reconstructed `CurrPic`. AMD VCN 5
+    (RDNA4-class, radeonsi) replaces that surface's buffer and frees it when
+    the picture is unreferenced; encoding into the source crashes the probe.
+  - Each IDR is submitted with this encoder's SPS/PPS as a packed header.
+    radeonsi parses that header into its slices but does not write it unless a
+    packed slice header is also sent, so an IDR that comes back without an SPS
+    is prefixed with the same bytes. Drivers that already emit the sets are
+    left as they are.
   - **Software H.264** (the in-tree Rust `openuuyc-codec`, BGRA → Annex-B) is the
     automatic fallback and is always offered, with live bitrate/FPS control,
     keyframe requests and the same quality/scaling policy the Windows path uses.

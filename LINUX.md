@@ -7,8 +7,9 @@ there. The app binary and UI on this branch remain OpenUUYC. Windows cfg paths
 stay intact.
 
 Linux can view and drive a remote machine, and since **v0.8.0** it can itself
-be controlled. Host behavior, limits, and setup are in
-[`LINUX-HOST.md`](LINUX-HOST.md). Current release notes:
+be controlled. Host VA-API encode keeps the source surface off `CurrPic` and
+prefixes radeonsi IDRs that omit parameter sets. Host behavior, limits, and
+setup are in [`LINUX-HOST.md`](LINUX-HOST.md). Current release notes:
 [`packaging/linux/RELEASE-NOTES.md`](packaging/linux/RELEASE-NOTES.md) (v0.8.1).
 
 ## What works (controller)
