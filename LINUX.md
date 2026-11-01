@@ -50,7 +50,7 @@ controller.
 | Microphone (local → remote) | Works (cpal; soak may vary by device) |
 | File transfer (dual-pane) | Works (XDG places); some Windows ACL/path checks are cfg-gated |
 | Clipboard text/image | Works (arboard) |
-| Clipboard files | **Partial** — FUSE offer; no AutoUnmount; Wayland polish TBD |
+| Clipboard files | **Partial** — controller FUSE offer (no AutoUnmount). Host → controller file paste serves `FileGroupDescriptorW` plus contents (task 0, Unix-second protobuf times); live Windows paste still needs a retest. See [`LINUX-HOST.md`](LINUX-HOST.md) |
 | HW decode | **Partial** — VA-API H.264 + HEVC Main; Main10 missing; no dmabuf zero-copy (vs DXVA) |
 | Plugins / node graph | **Missing** — stub host |
 | Annotation branding | **Partial** — board works; GDI brand strokes empty |

@@ -114,6 +114,24 @@ pub struct ClipboardFileDescriptor {
     pub file_size: u64,
 }
 
+// Official clients (UU 4.41.2) send and read Unix seconds on
+// `ClipboardFileDescriptor.last_write_time`. FILEGROUPDESCRIPTORW blobs and
+// in-process descriptors stay Windows FILETIME ticks. Do not guess units:
+// a value that is not a FILETIME becomes 0 rather than a second-count treated
+// as ticks.
+const FILETIME_EPOCH_SECONDS: u64 = 11_644_473_600;
+const TICKS_PER_SECOND: u64 = 10_000_000;
+
+/// Convert native FILETIME ticks to the wire's whole Unix seconds.
+pub(super) fn wire_seconds(ticks: u64) -> u64 {
+    if ticks > i64::MAX as u64 {
+        return 0;
+    }
+    ticks
+        .checked_sub(FILETIME_EPOCH_SECONDS * TICKS_PER_SECOND)
+        .map_or(0, |elapsed| elapsed / TICKS_PER_SECOND)
+}
+
 #[derive(Clone, PartialEq, Message)]
 pub struct ClipboardFileDescriptorListRequest {
     #[prost(uint32, tag = "1")]
@@ -256,4 +274,29 @@ pub enum ClipboardResponseKind {
     DescSegmentConfirm(ClipboardFileDescriptorSegmentConfirm),
     #[prost(message, tag = "8")]
     AutoSaveCompleteResponse(DragDropAutoSaveCompleteResponse),
+}
+
+#[cfg(test)]
+mod wire_time_tests {
+    use super::*;
+
+    #[test]
+    fn filetime_epoch_is_unix_zero() {
+        let ticks = 11_644_473_600u64 * 10_000_000;
+        assert_eq!(wire_seconds(ticks), 0);
+    }
+
+    #[test]
+    fn known_unix_instant_round_trips_to_whole_seconds() {
+        let unix = 1_700_000_000u64;
+        let ticks = (unix + 11_644_473_600) * 10_000_000 + 1_000_000;
+        assert_eq!(wire_seconds(ticks), unix);
+    }
+
+    #[test]
+    fn non_filetime_values_are_not_guessed() {
+        assert_eq!(wire_seconds(0), 0);
+        assert_eq!(wire_seconds(1_700_000_000), 0);
+        assert_eq!(wire_seconds(u64::MAX), 0);
+    }
 }

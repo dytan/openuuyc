@@ -7,9 +7,12 @@
 //! * Files copied here are offered to the remote: it pulls the descriptor list
 //!   and then the contents by offset, so nothing has to be promised in advance.
 //!   Local file copies (text/uri-list, gnome-copied-files, kde-cutselection) are
-//!   advertised to the remote as FileGroupDescriptorW/FileContents so a Mac
-//!   paste can pull them. Incoming remote files still need real local paths
-//!   (FUSE mount or Downloads drop) before a paste into a local app.
+//!   advertised to the remote as FileGroupDescriptorW/FileContents — the same
+//!   pair a Windows host publishes. Official controllers often ask for the
+//!   binary descriptor, then FileContents on task 0, without FileDescListRequest.
+//!   The protobuf list carries Unix seconds; the binary blob keeps FILETIME.
+//!   Incoming remote files still need real local paths (FUSE mount or Downloads
+//!   drop) before a paste into a local app.
 use super::formats::{self, Format};
 use super::*;
 use anyhow::Context as _;
@@ -179,10 +182,10 @@ impl LocalSnapshot {
                 "FileGroupDescriptorW".into(),
             ));
             ids.push((formats::register("FileContents"), "FileContents".into()));
-            ids.push((
-                formats::register("Preferred DropEffect"),
-                "Preferred DropEffect".into(),
-            ));
+            // Preferred DropEffect stays off the wire. The Windows host never
+            // publishes it (it replaces a file copy with this pair only), and
+            // advertising it from Linux is a dialect difference with nothing
+            // behind it. `data` still answers COPY if a peer asks anyway.
             return ids;
         }
         // Text and image are mutually exclusive in a snapshot. Prefer image when
@@ -224,8 +227,11 @@ impl LocalSnapshot {
                 || format.wire.name.eq_ignore_ascii_case("image/jpeg") =>
             {
                 self.image.clone().context("本地剪贴板没有图片")
-            },
-            _ if format.wire.name.eq_ignore_ascii_case("FileGroupDescriptorW")
+            }
+            _ if format
+                .wire
+                .name
+                .eq_ignore_ascii_case("FileGroupDescriptorW")
                 || format.wire.name.eq_ignore_ascii_case("FileGroupDescriptor") =>
             {
                 ensure!(!self.sources.is_empty(), "本地剪贴板没有文件");
@@ -233,7 +239,11 @@ impl LocalSnapshot {
                 let descs: Vec<_> = files.items.iter().map(|f| f.desc.clone()).collect();
                 descriptor_bytes(&descs)
             }
-            _ if format.wire.name.eq_ignore_ascii_case("Preferred DropEffect") => {
+            _ if format
+                .wire
+                .name
+                .eq_ignore_ascii_case("Preferred DropEffect") =>
+            {
                 // DROPEFFECT_COPY = 1
                 Ok(1u32.to_le_bytes().to_vec())
             }
@@ -336,16 +346,25 @@ fn collect_files(paths: &[PathBuf]) -> Result<LocalFiles> {
 
 /// Encode descriptors as a Windows FILEGROUPDESCRIPTORW blob (DWORD count +
 /// N × 592-byte FILEDESCRIPTORW). Same layout the Windows host parses.
+///
+/// `last_write_time` here is a FILETIME in 100 ns ticks. The protobuf
+/// descriptor list is a different field: see `descriptor_for_wire`.
 fn descriptor_bytes(items: &[ClipboardFileDescriptor]) -> Result<Vec<u8>> {
     ensure!(items.len() <= MAX_FILES, "文件数量过多");
     let mut bytes = vec![0u8; 4 + items.len() * 592];
     bytes[..4].copy_from_slice(&(items.len() as u32).to_le_bytes());
     for (slot, file) in bytes[4..].chunks_exact_mut(592).zip(items) {
         ensure!(formats::safe_name(&file.file_name), "不安全的文件名称");
-        // FD_ATTRIBUTES | FD_WRITESTIME | FD_FILESIZE | FD_PROGRESSUI
-        slot[..4].copy_from_slice(&0x4064u32.to_le_bytes());
+        // FD_ATTRIBUTES | FD_FILESIZE | FD_PROGRESSUI, plus FD_WRITESTIME when
+        // the tick value is a real FILETIME. An unknown time omits the flag
+        // instead of claiming 1601-01-01.
+        let has_time = file.last_write_time != 0 && file.last_write_time <= i64::MAX as u64;
+        let flags = if has_time { 0x4064u32 } else { 0x4044u32 };
+        slot[..4].copy_from_slice(&flags.to_le_bytes());
         slot[36..40].copy_from_slice(&file.file_attributes.to_le_bytes());
-        slot[56..64].copy_from_slice(&file.last_write_time.to_le_bytes());
+        if has_time {
+            slot[56..64].copy_from_slice(&file.last_write_time.to_le_bytes());
+        }
         slot[64..68].copy_from_slice(&((file.file_size >> 32) as u32).to_le_bytes());
         slot[68..72].copy_from_slice(&(file.file_size as u32).to_le_bytes());
         let win_name = file.file_name.replace('/', "\\");
@@ -354,6 +373,29 @@ fn descriptor_bytes(items: &[ClipboardFileDescriptor]) -> Result<Vec<u8>> {
         }
     }
     Ok(bytes)
+}
+
+/// Clipboard file task the official client uses when it skips
+/// `FileDescListRequest` and reads contents straight after the descriptor blob.
+const CLIPBOARD_TASK: u32 = 0;
+
+fn pin_clipboard_task(
+    tasks: &mut std::collections::HashMap<(u64, u32), Arc<LocalFiles>>,
+    session_id: u64,
+    files: Arc<LocalFiles>,
+) -> Result<()> {
+    let key = (session_id, CLIPBOARD_TASK);
+    ensure!(tasks.len() < 32 || tasks.contains_key(&key), "文件任务过多");
+    tasks.insert(key, files);
+    Ok(())
+}
+
+/// Protobuf `last_write_time` is whole Unix seconds. Internal descriptors and
+/// the FILEGROUPDESCRIPTORW blob stay FILETIME ticks.
+fn descriptor_for_wire(desc: &ClipboardFileDescriptor) -> ClipboardFileDescriptor {
+    let mut wire = desc.clone();
+    wire.last_write_time = super::protocol::wire_seconds(desc.last_write_time);
+    wire
 }
 
 impl LocalFiles {
@@ -1652,6 +1694,48 @@ fn publish_local(state: &mut State) -> Result<()> {
     Ok(())
 }
 
+/// Files behind a descriptor answer: an explicit publish/drop if one is live,
+/// otherwise the clipboard copy. Does not consume `explicit` — `FileDescListRequest`
+/// still owns that handoff.
+fn files_for_descriptor(state: &State, session_id: u64) -> Result<Arc<LocalFiles>> {
+    if let Some((files, ticket)) = state.explicit.get(&session_id) {
+        let live = match ticket {
+            Some(ticket) => ticket.valid(),
+            None => true,
+        };
+        if live && !files.items.is_empty() {
+            return Ok(files.clone());
+        }
+    }
+    if let Some(files) = state.tasks.get(&(session_id, CLIPBOARD_TASK)) {
+        if !files.items.is_empty() {
+            return Ok(files.clone());
+        }
+    }
+    ensure!(!state.local.sources.is_empty(), "本地剪贴板没有文件");
+    Ok(Arc::new(collect_files(&state.local.sources)?))
+}
+
+/// Answer `FileGroupDescriptorW`.
+///
+/// Official Windows (and Windows-dialect Mac) controllers ask for this blob by
+/// name, then `FileContentsRequest` on task 0. They may never send
+/// `FileDescListRequest`. The list has to be pinned here or the contents read
+/// comes back as "文件任务已失效" and the paste stops.
+fn descriptor_blob(state: &mut State, session_id: u64) -> Result<Vec<u8>> {
+    tracing::debug!(session_id, "对面来问 FileGroupDescriptorW 描述符块");
+    let files = files_for_descriptor(state, session_id)?;
+    pin_clipboard_task(&mut state.tasks, session_id, files.clone())?;
+    let descriptors: Vec<_> = files.items.iter().map(|file| file.desc.clone()).collect();
+    tracing::info!(
+        session_id,
+        task = CLIPBOARD_TASK,
+        items = descriptors.len(),
+        "已登记剪贴板文件任务并回传描述符块"
+    );
+    descriptor_bytes(&descriptors)
+}
+
 fn serve(
     state: &mut State,
     session: &Arc<Inner>,
@@ -1662,16 +1746,34 @@ fn serve(
     match kind {
         ClipboardRequestKind::FormatDataAsk(ask) => {
             let result = (|| -> Result<Vec<u8>> {
-                let formats = state.published.get(&session.id).context("原剪贴板已失效")?;
-                let format = formats
-                    .iter()
-                    .find(|format| {
-                        format.wire.id == ask.format_id
-                            && (ask.format_name.is_empty() || ask.format_name == format.wire.name)
-                    })
-                    .context("未发布该剪贴板格式")?;
-                let data = state.local.data(format)?;
-                formats::convert(data, format, session.platform.load(Ordering::Acquire), true)
+                let format = {
+                    let formats = state.published.get(&session.id).context("原剪贴板已失效")?;
+                    formats
+                        .iter()
+                        .find(|format| {
+                            format.wire.id == ask.format_id
+                                && (ask.format_name.is_empty()
+                                    || ask.format_name == format.wire.name)
+                        })
+                        .cloned()
+                        .context("未发布该剪贴板格式")?
+                };
+                if format
+                    .wire
+                    .name
+                    .eq_ignore_ascii_case("FileGroupDescriptorW")
+                    || format.wire.name.eq_ignore_ascii_case("FileGroupDescriptor")
+                {
+                    ensure!(session.file_allowed(), "文件剪贴板已关闭");
+                    return descriptor_blob(state, session.id);
+                }
+                let data = state.local.data(&format)?;
+                formats::convert(
+                    data,
+                    &format,
+                    session.platform.load(Ordering::Acquire),
+                    true,
+                )
             })();
             match result {
                 Ok(data) if !data.is_empty() => {
@@ -1759,17 +1861,23 @@ fn serve(
                 "已回传文件描述列表"
             );
             state.tasks.insert((session.id, ask.task_id), files.clone());
+            // Same copy on task 0, so a contents read that follows the blob
+            // (and ignores this request's id) still resolves.
+            if ask.task_id != CLIPBOARD_TASK {
+                let _ = pin_clipboard_task(&mut state.tasks, session.id, files.clone());
+            }
             // Stay below the SDK's 512 KiB message ceiling even with long names.
             let mut segments = Vec::<Vec<ClipboardFileDescriptor>>::new();
             let mut current = Vec::new();
             let mut bytes = 0;
             for item in &files.items {
-                let size = item.desc.encoded_len() + 8;
+                let wire = descriptor_for_wire(&item.desc);
+                let size = wire.encoded_len() + 8;
                 if current.len() == 1500 || bytes + size > 450_000 {
                     segments.push(std::mem::take(&mut current));
                     bytes = 0;
                 }
-                current.push(item.desc.clone());
+                current.push(wire);
                 bytes += size;
             }
             if !current.is_empty() {
@@ -1819,7 +1927,13 @@ fn serve(
                     (1, data)
                 }
                 Err(error) => {
-                    tracing::warn!(%error, index = ask.list_index, "读取本地文件失败");
+                    tracing::warn!(
+                        %error,
+                        task = ask.task_id,
+                        index = ask.list_index,
+                        pinned = state.tasks.contains_key(&(session.id, CLIPBOARD_TASK)),
+                        "读取本地文件失败"
+                    );
                     (2, Vec::new())
                 }
             };
@@ -2094,7 +2208,8 @@ mod file_serve_tests {
         let bytes = descriptor_bytes(&items).unwrap();
         assert_eq!(u32::from_le_bytes(bytes[..4].try_into().unwrap()), 1);
         assert_eq!(bytes.len(), 4 + 592);
-        assert_eq!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()), 0x4064);
+        // No timestamp: FD_WRITESTIME stays clear so the peer does not stamp 1601.
+        assert_eq!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()), 0x4044);
         assert_eq!(u32::from_le_bytes(bytes[4 + 68..4 + 72].try_into().unwrap()), 5);
         let name: String = bytes[4 + 72..]
             .chunks_exact(2)
@@ -2105,6 +2220,73 @@ mod file_serve_tests {
         assert_eq!(name, "hello.txt");
     }
 
+    #[test]
+    fn blob_keeps_filetime_wire_list_uses_unix_seconds() {
+        let dir = unique_dir("time");
+        let path = dir.join("t.txt");
+        std::fs::write(&path, b"abc").unwrap();
+        let files = collect_files(&[path.clone()]).expect("collect");
+        let ticks = files.items[0].desc.last_write_time;
+        assert!(
+            ticks > 11_644_473_600 * 10_000_000,
+            "expected FILETIME ticks, got {ticks}"
+        );
+
+        let blob = descriptor_bytes(std::slice::from_ref(&files.items[0].desc)).unwrap();
+        assert_eq!(u32::from_le_bytes(blob[4..8].try_into().unwrap()), 0x4064);
+        let blob_ticks = u64::from_le_bytes(blob[4 + 56..4 + 64].try_into().unwrap());
+        assert_eq!(blob_ticks, ticks);
+
+        let wire = descriptor_for_wire(&files.items[0].desc);
+        let unix = std::fs::metadata(&path).unwrap().mtime().max(0) as u64;
+        assert_eq!(wire.last_write_time, unix);
+        assert_ne!(wire.last_write_time, ticks);
+        // Whole seconds: sub-second ticks must not leak onto the wire.
+        assert_eq!(wire.last_write_time, super::protocol::wire_seconds(ticks));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn pinned_clipboard_task_serves_contents_without_desc_list() {
+        let dir = unique_dir("pin");
+        let path = dir.join("note.txt");
+        std::fs::write(&path, b"paste-me").unwrap();
+        let files = Arc::new(collect_files(&[path]).expect("collect"));
+        let mut tasks = std::collections::HashMap::new();
+        pin_clipboard_task(&mut tasks, 7, files).unwrap();
+
+        let pinned = tasks.get(&(7, CLIPBOARD_TASK)).expect("task 0");
+        assert_eq!(pinned.read(&req(0, 2, 0, 8)).unwrap(), b"paste-me");
+        assert!(tasks.get(&(7, 1)).is_none(), "no other task was invented");
+        // A second pin of the same session replaces task 0 instead of overflowing.
+        let again = tasks.get(&(7, CLIPBOARD_TASK)).unwrap().clone();
+        pin_clipboard_task(&mut tasks, 7, again).unwrap();
+        assert_eq!(tasks.len(), 1);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn file_offer_advertises_windows_pair_only() {
+        let snap = LocalSnapshot {
+            sources: vec![PathBuf::from("/tmp/a.txt")],
+            text: Some("a.txt".into()),
+            image: Some(vec![1, 2, 3]),
+        };
+        let names: Vec<_> = snap
+            .format_ids()
+            .into_iter()
+            .map(|(_, name)| name)
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "FileGroupDescriptorW".to_string(),
+                "FileContents".to_string(),
+            ]
+        );
+    }
 }
 
 #[cfg(test)]
