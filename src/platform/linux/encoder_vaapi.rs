@@ -6,19 +6,27 @@
 //! with) and upload into a VA surface. The driver encodes a single low-latency
 //! slice per frame (no B-frames, 1 reference, IDR on request or GOP boundary).
 //!
-//! cros-libva here exposes neither packed-header buffers nor VPP, so we emit the
-//! SPS/PPS ourselves in Annex-B and prepend them to each IDR -- unless the
-//! driver already inserted them into the coded buffer, which we detect and skip.
+//! The source surface is never `CurrPic`. radeonsi on VCN 5 (RDNA4-class)
+//! treats that slot as a DPB entry: it replaces the surface's buffer and frees
+//! it once unreferenced, which crashes the startup probe if the uploaded
+//! picture was named there.
+//!
+//! SPS/PPS are submitted as a packed header. i965 and iHD write those bytes
+//! into the stream; radeonsi parses them into its slices but writes them only
+//! beside a packed slice header, which this encoder does not send. An IDR that
+//! comes back without an SPS is therefore prefixed with the same bytes
+//! ([`include_parameter_sets`]).
 use anyhow::{Context as _, Result, bail, ensure};
 use std::rc::Rc;
 
 use cros_libva::{
     BufferType, Config, Context, Display, EncCodedBuffer, EncMiscParameter,
-    EncMiscParameterFrameRate, EncMiscParameterHRD, EncMiscParameterRateControl, EncPictureParameter,
-    EncPictureParameterBufferH264, EncSequenceParameter, EncSequenceParameterBufferH264,
-    EncSliceParameter, EncSliceParameterBufferH264, H264EncPicFields, H264EncSeqFields, Image,
-    MappedCodedBuffer, Picture, PictureH264, RcFlags, Surface, UsageHint, VAConfigAttrib,
-    VAConfigAttribType, VAEntrypoint, VAImageFormat, VAProfile, VASurfaceID,
+    EncMiscParameterFrameRate, EncMiscParameterHRD, EncMiscParameterRateControl,
+    EncPictureParameter, EncPictureParameterBufferH264, EncSequenceParameter,
+    EncSequenceParameterBufferH264, EncSliceParameter, EncSliceParameterBufferH264,
+    H264EncPicFields, H264EncSeqFields, Image, MappedCodedBuffer, Picture, PictureH264, RcFlags,
+    Surface, UsageHint, VAConfigAttrib, VAConfigAttribType, VAEntrypoint, VAImageFormat, VAProfile,
+    VASurfaceID,
 };
 
 const VA_RT_FORMAT_YUV420: u32 = cros_libva::VA_RT_FORMAT_YUV420;
@@ -49,12 +57,14 @@ pub(super) struct Encoder {
     vpp: Option<cros_libva::VppContext>,
     src_surface: Option<Surface<()>>,
     src_dims: (u32, u32),
-    // Reconstructed/reference surfaces (CurrPic / RefPicList). Separate from
-    // the input surface so a VPP write into the input is not clobbered when the
-    // driver uses CurrPic as the reconstruction target.
+    // Reconstructed/reference surfaces (CurrPic / RefPicList). Never the
+    // encode source: radeonsi on VCN 5 replaces the CurrPic buffer with its
+    // own DPB buffer and drops it once unreferenced.
     surfaces: [Option<Surface<()>>; 2],
     /// Raw NV12 input for vaBeginPicture (CPU upload or VPP output).
     input_surface: Option<Surface<()>>,
+    /// Driver accepted raw SPS/PPS packed headers at config time.
+    packed_headers: bool,
     coded: EncCodedBuffer,
     width: u32,
     height: u32,
@@ -86,7 +96,6 @@ pub(super) struct Encoder {
     sps: Vec<u8>,
     pps: Vec<u8>,
     nv12_pad: Vec<u8>, // scratch for the bottom padding row
-    driver_inserts_headers: Option<bool>,
 }
 
 const MAX_FRAME_NUM: u32 = 32; // log2_max_frame_num_minus4 = 1 -> 2^5
@@ -101,8 +110,8 @@ impl Encoder {
             size.1
         );
         let display = open_display()?;
-        let (profile, entrypoint) = pick_profile_entrypoint(&display)
-            .context("当前 VA-API 驱动不支持 H.264 编码")?;
+        let (profile, entrypoint) =
+            pick_profile_entrypoint(&display).context("当前 VA-API 驱动不支持 H.264 编码")?;
 
         // Required + rate-control attributes.
         let mut query = vec![
@@ -130,7 +139,10 @@ impl Encoder {
             Rc_::Cqp
         };
 
-        let config_attrs = vec![
+        // Echo the packed-header modes the driver advertises. Without this,
+        // i965/iHD omit SPS/PPS; with it, they write the raw headers we submit.
+        let packed_headers = packed_header_attrib(&display, profile, entrypoint);
+        let mut config_attrs = vec![
             VAConfigAttrib {
                 type_: VAConfigAttribType::VAConfigAttribRTFormat,
                 value: VA_RT_FORMAT_YUV420,
@@ -144,6 +156,12 @@ impl Encoder {
                 },
             },
         ];
+        if let Some(value) = packed_headers {
+            config_attrs.push(VAConfigAttrib {
+                type_: VAConfigAttribType::VAConfigAttribEncPackedHeaders,
+                value,
+            });
+        }
         let config = display
             .create_config(config_attrs, profile, entrypoint)
             .map_err(|e| anyhow::anyhow!("创建 VA-API 编码配置失败: {e}"))?;
@@ -236,6 +254,7 @@ impl Encoder {
             image_fmt,
             surfaces: [Some(s0), Some(s1)],
             input_surface: input_surfaces.pop(),
+            packed_headers: packed_headers.is_some(),
             coded,
             width: size.0,
             height: size.1,
@@ -266,7 +285,6 @@ impl Encoder {
             sps: Vec::new(),
             pps: Vec::new(),
             nv12_pad: Vec::new(),
-            driver_inserts_headers: None,
             bgra_fmt,
             vpp,
             src_surface: None,
@@ -279,7 +297,11 @@ impl Encoder {
             height = size.1,
             profile = profile_name(profile),
             low_power = entrypoint == VAEntrypoint::VAEntrypointEncSliceLP,
-            rc = match enc.rc { Rc_::Cbr => "CBR", Rc_::Vbr => "VBR", Rc_::Cqp => "CQP" },
+            rc = match enc.rc {
+                Rc_::Cbr => "CBR",
+                Rc_::Vbr => "VBR",
+                Rc_::Cqp => "CQP",
+            },
             "VA-API H.264 encoder ready"
         );
         Ok(enc)
@@ -288,9 +310,6 @@ impl Encoder {
     pub(super) fn maximum_size(&self) -> (u32, u32) {
         (4096, 4096)
     }
-    pub(super) fn driver_inserts_headers(&self) -> Option<bool> {
-        self.driver_inserts_headers
-    }
 
     pub(super) fn set_rate(&mut self, bitrate: u32, fps: u32) {
         self.bitrate = bitrate.max(300_000);
@@ -298,7 +317,12 @@ impl Encoder {
     }
 
     /// Encode one BGRA frame. `force` requests an IDR.
-    pub(super) fn encode(&mut self, bgra: &[u8], _timestamp: i64, force: bool) -> Result<Vec<Packet>> {
+    pub(super) fn encode(
+        &mut self,
+        bgra: &[u8],
+        _timestamp: i64,
+        force: bool,
+    ) -> Result<Vec<Packet>> {
         let pitch = self.width as usize * 4;
         ensure!(
             bgra.len() >= pitch * self.height as usize,
@@ -306,10 +330,7 @@ impl Encoder {
         );
 
         // Upload into the dedicated input surface; recon lives in surfaces[slot].
-        let input = self
-            .input_surface
-            .take()
-            .context("VA-API 输入表面缺失")?;
+        let input = self.input_surface.take().context("VA-API 输入表面缺失")?;
         self.upload_nv12(&input, bgra, pitch)?;
         let recon_id = self.surfaces[self.slot]
             .as_ref()
@@ -350,10 +371,7 @@ impl Encoder {
         src_h: u32,
         force: bool,
     ) -> Result<Vec<Packet>> {
-        let input = self
-            .input_surface
-            .take()
-            .context("VA-API 输入表面缺失")?;
+        let input = self.input_surface.take().context("VA-API 输入表面缺失")?;
         let input_id = input.id();
         self.vpp
             .as_ref()
@@ -368,32 +386,31 @@ impl Encoder {
             .context("VA-API 重建表面缺失")?
             .id();
         if std::env::var_os("OPENUUYC_VPP_BRIDGE").is_some() {
-            let recon = self.surfaces[self.slot]
-                .take()
-                .context("VA-API 重建表面缺失")?;
-            let img = Image::create_from(
-                &input,
-                self.image_fmt,
-                (self.aligned_w, self.aligned_h),
-                (self.width, self.height),
-            )
-            .map_err(|e| anyhow::anyhow!("VPP GetImage 失败: {e}"))?;
-            let va = *img.image();
-            let buf = img.as_ref();
-            self.upload_nv12_planes(
-                &recon,
-                &buf[va.offsets[0] as usize..],
-                va.pitches[0] as usize,
-                &buf[va.offsets[1] as usize..],
-                va.pitches[1] as usize,
-            )?;
-            drop(img);
-            let rid = recon.id();
-            recon
+            // CPU round-trip of the VPP output back into the input surface.
+            // CurrPic stays the separate recon slot: naming the source as
+            // CurrPic lets radeonsi on VCN 5 free that buffer under the encoder.
+            let (y, y_pitch, c, c_pitch) = {
+                let img = Image::create_from(
+                    &input,
+                    self.image_fmt,
+                    (self.aligned_w, self.aligned_h),
+                    (self.width, self.height),
+                )
+                .map_err(|e| anyhow::anyhow!("VPP GetImage 失败: {e}"))?;
+                let va = *img.image();
+                let buf = img.as_ref();
+                (
+                    buf[va.offsets[0] as usize..].to_vec(),
+                    va.pitches[0] as usize,
+                    buf[va.offsets[1] as usize..].to_vec(),
+                    va.pitches[1] as usize,
+                )
+            };
+            self.upload_nv12_planes(&input, &y, y_pitch, &c, c_pitch)?;
+            input
                 .sync()
                 .map_err(|e| anyhow::anyhow!("同步 VPP→编码表面失败: {e}"))?;
-            self.input_surface = Some(input);
-            return self.finish_encode_same(recon, rid, force);
+            return self.finish_encode(input, recon_id, force);
         }
         self.finish_encode(input, recon_id, force)
     }
@@ -490,25 +507,10 @@ impl Encoder {
         recon_id: VASurfaceID,
         force: bool,
     ) -> Result<Vec<Packet>> {
-        self.finish_encode_ex(input, recon_id, force, false)
-    }
-
-    fn finish_encode_same(
-        &mut self,
-        surface: Surface<()>,
-        surface_id: VASurfaceID,
-        force: bool,
-    ) -> Result<Vec<Packet>> {
-        self.finish_encode_ex(surface, surface_id, force, true)
-    }
-
-    fn finish_encode_ex(
-        &mut self,
-        input: Surface<()>,
-        recon_id: VASurfaceID,
-        force: bool,
-        return_to_slot: bool,
-    ) -> Result<Vec<Packet>> {
+        // radeonsi on VCN 5 frees the CurrPic surface's buffer. The uploaded
+        // picture must be a different surface or the next frame crashes in the
+        // driver's buffer lookup.
+        ensure!(input.id() != recon_id, "VA-API 拒绝把源表面当作重建目标");
         let is_idr = force || !self.have_ref || self.frame_count % self.gop == 0;
 
         // Track the delivered frame rate so CBR budgets bits/frame against
@@ -554,12 +556,12 @@ impl Encoder {
             (0u8, fnum, poc) // P slice; frame_num here is prev ref's
         };
 
-        let buffers =
-            self.build_frame_buffers(recon_id, is_idr, slice_type, frame_num, poc, reset_rc, eff_fps)?;
+        let buffers = self.build_frame_buffers(
+            recon_id, is_idr, slice_type, frame_num, poc, reset_rc, eff_fps,
+        )?;
 
-        // Render.
-        // BeginPicture(input); CurrPic(recon) — ffmpeg's split. Sharing one
-        // surface for both left VPP-fed frames mid-gray on iHD.
+        // BeginPicture(input); CurrPic(recon). Sharing one surface for both
+        // left VPP-fed frames mid-gray on iHD, and crashes radeonsi on VCN 5.
         let mut picture = Picture::new(self.frame_count as u64, Rc::clone(&self.context), input);
         for buf in buffers {
             picture.add_buffer(buf);
@@ -571,7 +573,9 @@ impl Encoder {
             .map_err(|e| anyhow::anyhow!("VA-API render 失败: {e}"))?
             .end()
             .map_err(|e| anyhow::anyhow!("VA-API end 失败: {e}"))?;
-        let picture = picture.sync().map_err(|(e, _)| anyhow::anyhow!("VA-API sync 失败: {e}"))?;
+        let picture = picture
+            .sync()
+            .map_err(|(e, _)| anyhow::anyhow!("VA-API sync 失败: {e}"))?;
 
         // Read the coded bitstream.
         let mut bitstream = Vec::new();
@@ -587,23 +591,12 @@ impl Encoder {
         let returned = picture
             .take_surface()
             .map_err(|_| anyhow::anyhow!("无法回收 VA-API 表面"))?;
-        if return_to_slot {
-            self.surfaces[self.slot] = Some(returned);
-        } else {
-            self.input_surface = Some(returned);
-        }
+        self.input_surface = Some(returned);
 
-        // Detect once whether the driver already emits SPS/PPS.
-        if self.driver_inserts_headers.is_none() && is_idr {
-            self.driver_inserts_headers = Some(contains_nal(&bitstream, 7));
-        }
-
-        let mut data = Vec::with_capacity(bitstream.len() + 64);
-        if is_idr && self.driver_inserts_headers == Some(false) {
-            data.extend_from_slice(&self.sps);
-            data.extend_from_slice(&self.pps);
-        }
-        data.extend_from_slice(&bitstream);
+        // radeonsi parses the packed SPS/PPS but does not write them. Prefix
+        // the same bytes when this IDR arrived without an SPS. Drivers that
+        // already wrote them (i965, iHD) are left as they are.
+        let data = include_parameter_sets(bitstream, &self.parameter_sets(), is_idr);
 
         // Advance reference/frame state for the next frame.
         self.ref_surface_id = recon_id;
@@ -611,7 +604,8 @@ impl Encoder {
         self.ref_poc = poc;
         self.have_ref = true;
         // The just-encoded reference gets the next frame_num / poc.
-        self.frame_num = ((u32::from(self.frame_num) + if is_idr { 0 } else { 1 }) % MAX_FRAME_NUM) as u16;
+        self.frame_num =
+            ((u32::from(self.frame_num) + if is_idr { 0 } else { 1 }) % MAX_FRAME_NUM) as u16;
         if is_idr {
             self.frame_num = 0;
             self.idr_id = self.idr_id.wrapping_add(1) & 0xffff;
@@ -680,12 +674,38 @@ impl Encoder {
             );
             buffers.push(
                 self.context
-                    .create_buffer(BufferType::EncSequenceParameter(EncSequenceParameter::H264(
-                        seq,
-                    )))
+                    .create_buffer(BufferType::EncSequenceParameter(
+                        EncSequenceParameter::H264(seq),
+                    ))
                     .map_err(|e| anyhow::anyhow!("创建 seq 缓冲失败: {e}"))?,
             );
 
+            // The driver writes the slice but not necessarily the parameter
+            // sets. Submit the SPS/PPS as one raw packed header (the only form
+            // i965 accepts: asking it to generate them yields "Invalid packed
+            // header data"). radeonsi parses them into its slice parameters
+            // but writes them out only next to a packed slice header, which
+            // we do not send — `include_parameter_sets` puts them back.
+            if self.packed_headers {
+                let parameter_sets = self.parameter_sets();
+                let bit_length = (parameter_sets.len() * 8) as u32;
+                buffers.push(
+                    self.context
+                        .create_buffer(BufferType::EncPackedHeaderParameter(
+                            cros_libva::EncPackedHeaderParameter::new(
+                                cros_libva::VAEncPackedHeaderTypeH264::VAEncPackedHeaderH264_SPS,
+                                bit_length,
+                                true,
+                            ),
+                        ))
+                        .map_err(|e| anyhow::anyhow!("创建 packed header 参数失败: {e}"))?,
+                );
+                buffers.push(
+                    self.context
+                        .create_buffer(BufferType::EncPackedHeaderData(parameter_sets))
+                        .map_err(|e| anyhow::anyhow!("创建 packed header 数据失败: {e}"))?,
+                );
+            }
         }
 
         // Rate-control misc buffers are sent EVERY frame (not just on IDR) so
@@ -699,7 +719,13 @@ impl Encoder {
         }
 
         // Picture parameters.
-        let curr_pic = PictureH264::new(curr_surface_id, u32::from(frame_num), SHORT_TERM_REF, poc, poc);
+        let curr_pic = PictureH264::new(
+            curr_surface_id,
+            u32::from(frame_num),
+            SHORT_TERM_REF,
+            poc,
+            poc,
+        );
         let mut ref_frames = empty_refs();
         if !is_idr && self.have_ref {
             ref_frames[0] = PictureH264::new(
@@ -740,7 +766,9 @@ impl Encoder {
         );
         buffers.push(
             self.context
-                .create_buffer(BufferType::EncPictureParameter(EncPictureParameter::H264(pic)))
+                .create_buffer(BufferType::EncPictureParameter(EncPictureParameter::H264(
+                    pic,
+                )))
                 .map_err(|e| anyhow::anyhow!("创建 pic 缓冲失败: {e}"))?,
         );
 
@@ -795,7 +823,9 @@ impl Encoder {
         );
         buffers.push(
             self.context
-                .create_buffer(BufferType::EncSliceParameter(EncSliceParameter::H264(slice)))
+                .create_buffer(BufferType::EncSliceParameter(EncSliceParameter::H264(
+                    slice,
+                )))
                 .map_err(|e| anyhow::anyhow!("创建 slice 缓冲失败: {e}"))?,
         );
 
@@ -827,7 +857,10 @@ impl Encoder {
 
             let buffer_size = self.bitrate; // ~1s coded buffer
             let initial = buffer_size / 2;
-            out.push(EncMiscParameter::HRD(EncMiscParameterHRD::new(initial, buffer_size)));
+            out.push(EncMiscParameter::HRD(EncMiscParameterHRD::new(
+                initial,
+                buffer_size,
+            )));
         }
         out.push(EncMiscParameter::FrameRate(EncMiscParameterFrameRate::new(
             eff_fps.max(1),
@@ -892,7 +925,7 @@ impl Encoder {
         Ok(())
     }
 
-        fn upload_nv12(&mut self, surface: &Surface<()>, bgra: &[u8], pitch: usize) -> Result<()> {
+    fn upload_nv12(&mut self, surface: &Surface<()>, bgra: &[u8], pitch: usize) -> Result<()> {
         let mut image = Image::create_from(
             surface,
             self.image_fmt,
@@ -968,6 +1001,16 @@ impl Encoder {
         w.u(8, if self.profile_idc == 66 { 0x40 } else { 0x00 });
         w.u(8, u32::from(self.level_idc));
         w.ue(0); // seq_parameter_set_id
+        // High must declare 4:2:0 8-bit before log2_max_frame_num. Main and
+        // Constrained Baseline omit this block. These bytes are what radeonsi
+        // parses from the packed header, so they have to match the slices.
+        if self.profile_idc == 100 {
+            w.ue(1); // chroma_format_idc (4:2:0)
+            w.ue(0); // bit_depth_luma_minus8
+            w.ue(0); // bit_depth_chroma_minus8
+            w.u(1, 0); // qpprime_y_zero_transform_bypass_flag
+            w.u(1, 0); // seq_scaling_matrix_present_flag
+        }
         w.ue(1); // log2_max_frame_num_minus4
         w.ue(0); // pic_order_cnt_type
         w.ue(2); // log2_max_pic_order_cnt_lsb_minus4
@@ -988,6 +1031,15 @@ impl Encoder {
         w.u(1, 0); // vui_parameters_present_flag
         w.rbsp_trailing();
         annexb(&w.into_bytes())
+    }
+
+    /// Annex-B SPS followed by PPS. Submitted as the packed header and, when
+    /// the driver drops it, prefixed onto the IDR.
+    fn parameter_sets(&self) -> Vec<u8> {
+        let mut sets = Vec::with_capacity(self.sps.len() + self.pps.len());
+        sets.extend_from_slice(&self.sps);
+        sets.extend_from_slice(&self.pps);
+        sets
     }
 }
 
@@ -1028,38 +1080,25 @@ fn chroma_v(r: i32, g: i32, b: i32) -> u8 {
 
 fn empty_refs() -> [PictureH264; 16] {
     std::array::from_fn(|_| {
-        PictureH264::new(cros_libva::VA_INVALID_ID, 0, cros_libva::VA_INVALID_SURFACE, 0, 0)
+        PictureH264::new(
+            cros_libva::VA_INVALID_ID,
+            0,
+            cros_libva::VA_INVALID_SURFACE,
+            0,
+            0,
+        )
     })
 }
 fn empty_ref_list() -> [PictureH264; 32] {
     std::array::from_fn(|_| {
-        PictureH264::new(cros_libva::VA_INVALID_ID, 0, cros_libva::VA_INVALID_SURFACE, 0, 0)
+        PictureH264::new(
+            cros_libva::VA_INVALID_ID,
+            0,
+            cros_libva::VA_INVALID_SURFACE,
+            0,
+            0,
+        )
     })
-}
-
-/// Whether the Annex-B stream contains a NAL of `nal_type`.
-fn contains_nal(data: &[u8], nal_type: u8) -> bool {
-    let mut i = 0;
-    while i + 4 < data.len() {
-        if data[i] == 0 && data[i + 1] == 0 {
-            let (sc, hdr) = if data[i + 2] == 1 {
-                (3, i + 3)
-            } else if data[i + 2] == 0 && data[i + 3] == 1 {
-                (4, i + 4)
-            } else {
-                (0, 0)
-            };
-            if sc != 0 {
-                if hdr < data.len() && data[hdr] & 0x1f == nal_type {
-                    return true;
-                }
-                i = hdr;
-                continue;
-            }
-        }
-        i += 1;
-    }
-    false
 }
 
 /// Prepend a 4-byte start code and apply emulation-prevention to an RBSP NAL.
@@ -1088,7 +1127,11 @@ struct BitWriter {
 }
 impl BitWriter {
     fn new() -> Self {
-        Self { bytes: Vec::new(), cur: 0, nbits: 0 }
+        Self {
+            bytes: Vec::new(),
+            cur: 0,
+            nbits: 0,
+        }
     }
     fn bit(&mut self, b: u32) {
         self.cur = (self.cur << 1) | (b & 1) as u8;
@@ -1133,6 +1176,73 @@ impl BitWriter {
             self.nbits = 0;
         }
         self.bytes
+    }
+}
+
+/// Puts our SPS/PPS in front of an IDR that arrived without them.
+///
+/// radeonsi (Mesa, VCN) emits packed non-slice headers only when a packed
+/// slice header is submitted as well, so its IDRs carry no SPS. Its slices
+/// follow the packed SPS/PPS it parsed, so these are the right ones to send.
+fn include_parameter_sets(mut encoded: Vec<u8>, parameter_sets: &[u8], idr: bool) -> Vec<u8> {
+    // A start code followed by an SPS header. Emulation prevention keeps
+    // `00 00 01` out of NAL payloads, so a 4-byte start code still matches
+    // the overlapping `00 00 01` window. Kept off `media::video_format`: the
+    // upstream GPU probes compile this encoder against another media module.
+    let has_sps = encoded
+        .windows(4)
+        .any(|window| window[..3] == [0, 0, 1] && window[3] & 0x1f == 7);
+    if idr && !has_sps {
+        let mut complete = parameter_sets.to_vec();
+        complete.append(&mut encoded);
+        complete
+    } else {
+        encoded
+    }
+}
+
+/// The packed-header modes to echo back into `vaCreateConfig`.
+///
+/// Sequence carries SPS, picture carries PPS. `None` means the driver does
+/// not advertise packed headers; IDRs are still prefixed locally.
+fn packed_header_attrib(
+    display: &Rc<Display>,
+    profile: VAProfile::Type,
+    entrypoint: VAEntrypoint::Type,
+) -> Option<u32> {
+    let mut attributes = [VAConfigAttrib {
+        type_: VAConfigAttribType::VAConfigAttribEncPackedHeaders,
+        value: 0,
+    }];
+    display
+        .get_config_attributes(profile, entrypoint, &mut attributes)
+        .ok()?;
+    let supported = attributes[0].value;
+    if supported == cros_libva::VA_ATTRIB_NOT_SUPPORTED || supported == 0 {
+        return None;
+    }
+    let enabled = supported
+        & (cros_libva::VA_ENC_PACKED_HEADER_SEQUENCE | cros_libva::VA_ENC_PACKED_HEADER_PICTURE);
+    (enabled != 0).then_some(enabled)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::include_parameter_sets;
+
+    #[test]
+    fn parameter_sets_lead_an_idr_without_them() {
+        let sets = [0, 0, 0, 1, 0x67, 1, 0, 0, 0, 1, 0x68, 2];
+        let idr = vec![0, 0, 0, 1, 0x65, 3];
+        let with_sets = include_parameter_sets(idr.clone(), &sets, true);
+        assert_eq!(with_sets, [&sets[..], &idr[..]].concat());
+        // An IDR that already has them, and a P frame, stay as they are.
+        assert_eq!(
+            include_parameter_sets(with_sets.clone(), &sets, true),
+            with_sets
+        );
+        let p = vec![0, 0, 0, 1, 0x41, 4];
+        assert_eq!(include_parameter_sets(p.clone(), &sets, false), p);
     }
 }
 
