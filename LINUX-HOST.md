@@ -45,9 +45,14 @@ controller.
   hi-res, keys, and US-ASCII text). Needs permission to `/dev/uinput`.
 - **Clipboard sync (text, images, files).** Bidirectional between the Linux host
   and the controller, using the Windows clipboard dialect so Windows **and** macOS
-  controllers interoperate. Text and images paste both ways; file copy works
-  (see the known gap below for Linux→controller files). Backed by
-  `wl-clipboard` / `arboard` on the host.
+  controllers interoperate. Text and images paste both ways. A file copied on
+  the Linux host is advertised as `FileGroupDescriptorW` + `FileContents` (no
+  extra shell formats). The descriptor blob keeps Windows FILETIME ticks; the
+  protobuf file list sends whole Unix seconds, which is what official
+  controllers read. Answering the blob also pins clipboard task 0 so a
+  contents read can follow without `FileDescListRequest`. Backed by
+  `wl-clipboard` / `arboard` on the host. Confirm with the retest below; this
+  has not been pasted against a live Windows controller in CI.
 - **Host-side file receive.** Files sent from the controller land in `~/Downloads`
   (name collisions are resolved) via the file-transfer **Send** path.
 - **Desktop audio.** Captured from the default sink monitor through `parec`
@@ -61,9 +66,6 @@ controller.
 - **Viewer drag-drop onto the video window** (controller → Linux host) does not
   write files yet — the OleDrop path is not wired. Use the file-transfer **Send**
   button instead; that works.
-- **Linux → controller file clipboard** is partial: files copied in a Linux file
-  manager are detected and advertised, but some controllers do not always fetch
-  them. Text and images are reliable both ways.
 - Virtual / headless displays, resolution & DPI changes, multi-monitor topology
   journaling (physical outputs only).
 - Remote microphone playback into the host (accepted on the wire, dropped).
@@ -110,7 +112,20 @@ asking a controller to connect.
    Linux device.
 3. Check, in order: video appears; mouse moves and clicks land where expected;
    keyboard types; scroll works; desktop audio is heard (if enabled).
-4. Toggle *允许被控* off and confirm the controller is dropped.
+4. **File paste, Linux → controller.** On the Hyprland host, copy one small file
+   in the file manager (not a screenshot). On the Windows controller, paste into
+   Explorer. The file should appear with its name, bytes, and a modification
+   time near the original (protobuf mtimes are whole Unix seconds; the OLE
+   descriptor still carries FILETIME ticks). If paste does nothing, the host log
+   should show `已登记剪贴板文件任务并回传描述符块` and then a contents read on
+   task 0 — a `文件任务已失效` line means the controller asked for a different
+   task id. Repeat the paste on a Mac controller if one is connected (same
+   Windows clipboard dialect).
+5. **Reverse smoke.** Copy a small file on the controller and confirm it still
+   arrives on the host (`~/Downloads` via Send, or a clipboard file offer).
+   Then copy text and an image each way so the sticky-image fix still holds:
+   an image followed by text must paste as text.
+6. Toggle *允许被控* off and confirm the controller is dropped.
 
 ## Caveat: device platform id
 
@@ -129,6 +144,13 @@ one clipboard fix. Release notes:
 - **Sticky-image clipboard** (`0b9cfad`). After an image sync, a later text copy
   no longer pastes as the old image. Remote clipboard accepts are sequenced, and
   a new text copy is advertised as text only.
+- **Linux → controller file paste** (after v0.8.1). Host file offers match the
+  Windows pair (`FileGroupDescriptorW` / `FileContents`). The binary descriptor
+  keeps FILETIME; protobuf `last_write_time` is Unix seconds. The descriptor
+  answer pins task 0 so contents can be read without a descriptor-list request.
+  Retest: copy a file on the Hyprland host and paste on a Windows controller;
+  then copy a small file on the controller and confirm it still lands in
+  `~/Downloads` or via FUSE. Text and image both ways after a file copy.
 - **Docs.** Upstream is now [Farwing](https://github.com/djkcyl/farwing)
   (`djkcyl/openuuyc` resolves there). This branch's binary and UI stay
   OpenUUYC. [`LINUX.md`](LINUX.md) matches host mode.
