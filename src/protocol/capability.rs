@@ -76,6 +76,10 @@ pub(crate) struct DualCapability {
     pub frame_quality_capability: Vec<FrameQualityCapability>,
     #[serde(skip)]
     preferred_hardware: Vec<FrameQualityCapability>,
+    /// The host is OpenUUYC. Hosts that advertise SDR10 also accept native
+    /// touch frames from a desktop controller. Official UU hosts do not.
+    #[serde(skip)]
+    pub openuuyc_host: bool,
 }
 
 impl DualCapability {
@@ -173,6 +177,7 @@ impl DualCapability {
             }
         }
         Self {
+            openuuyc_host: remote.openuuyc_sdr_10bit,
             preferred_codec: local.preferred_codec.filter(|c| matches!(c, 1|2|5))
                 .or(remote.preferred_codec.filter(|c| matches!(c, 1|2|5))),
             remote_display_info: remote.display_info,

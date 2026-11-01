@@ -18,8 +18,8 @@ use winit::event::{
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::window::{Window, WindowAttributes, WindowId};
 
-use crate::media::decoder::RenderSurface;
 use crate::features::remote_input::MouseMode;
+use crate::media::decoder::RenderSurface;
 use crate::ui::chrome::{
     WindowMoveState, WindowResizeState, cancel_pointer_operation, configure_dwm_window,
     resize_regions, title_bar_height, title_bar_panel, update_nonmodal_window_resize,
@@ -36,8 +36,7 @@ use crate::features::stream_control::RemoteScreen;
 use super::{
     AudioView, ConnectionProgress, ConnectionProgressApp, DecodedVideoFrame, NativeViewerSession,
     PerformancePanelMode, StreamControlUi, ViewerDisplayHandle, ViewerWindowEvent,
-    configure_viewer_visuals, mutex_lock, show_stream_control_window,
-    take_next_frame,
+    configure_viewer_visuals, mutex_lock, show_stream_control_window, take_next_frame,
 };
 
 pub(super) use crate::application::viewer_shortcuts::Action as ViewerShortcut;
@@ -88,6 +87,14 @@ fn run_player(config: ConnectingWindowsRunConfig, needs_display: bool) -> Result
         bail!(error);
     }
     Ok(())
+}
+
+fn earliest(a: Option<Instant>, b: Option<Instant>) -> Option<Instant> {
+    match (a, b) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (Some(a), None) | (None, Some(a)) => Some(a),
+        (None, None) => None,
+    }
 }
 
 fn ui_frame_interval(window: &Window) -> Duration {
@@ -520,6 +527,15 @@ impl ApplicationHandler<UiEvent> for ConnectingWindowsRunner {
         let (Some(window), Some(shell)) = (self.window.clone(), self.shell.as_mut()) else {
             return;
         };
+        // A contact on the picture is remote input. Everything else stays with
+        // the local UI, including egui.
+        if let WindowEvent::Touch(touch) = &event
+            && let Stage::Playing(player) = &mut self.stage
+            && player.touch(&shell.context, &window, touch)
+        {
+            self.schedule(Instant::now());
+            return;
+        }
         let response = shell.input.on_window_event(&window, &event);
         let consumed = response.consumed;
         if let Stage::Playing(player) = &mut self.stage {
@@ -612,6 +628,9 @@ impl ApplicationHandler<UiEvent> for ConnectingWindowsRunner {
                 }
             }
         }
+        if let (Stage::Playing(player), Some(window)) = (&mut self.stage, self.window.as_ref()) {
+            player.poll_gamepad(window);
+        }
         match self.next_repaint {
             Some(when) if when <= Instant::now() => {
                 if let Err(error) = self.render() {
@@ -621,10 +640,11 @@ impl ApplicationHandler<UiEvent> for ConnectingWindowsRunner {
             }
             _ => {}
         }
-        event_loop.set_control_flow(
-            self.next_repaint
-                .map_or(ControlFlow::Wait, ControlFlow::WaitUntil),
-        );
+        let mut wake = self.next_repaint;
+        if let Stage::Playing(player) = &self.stage {
+            wake = earliest(wake, player.gamepad_deadline());
+        }
+        event_loop.set_control_flow(wake.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
@@ -664,6 +684,10 @@ struct Player {
     wake: FrameWakeBridge,
     /// Identifies this window to `RemoteInput`, which arbitrates between windows.
     owner: u64,
+    /// SDL controller sampling. Wakes the loop on its own deadline; it does
+    /// not ask egui to repaint.
+    #[cfg(target_os = "linux")]
+    gamepad: super::linux_gamepad::GamepadCapture,
     stream_control_ui: StreamControlUi,
     performance_mode: PerformancePanelMode,
     intercept_shortcuts: bool,
@@ -714,12 +738,20 @@ impl Player {
             factory.register(Arc::clone(&session));
         }
         let wake = FrameWakeBridge::install(&session, proxy.clone(), window.id())?;
+        #[cfg(target_os = "linux")]
+        let gamepad = super::linux_gamepad::GamepadCapture::new(
+            session.stream_control.mouse().clone(),
+            owner,
+        );
         let performance_mode = session.stream_control.device_preferences().performance_mode;
         let annotation =
             super::annotation::AnnotationUi::new(session.stream_control.clone(), owner);
         let selected = Some(session.screen_id());
         Ok(Self {
-            catalog: screens.as_ref().map(ScreenPlayback::screens).unwrap_or_default(),
+            catalog: screens
+                .as_ref()
+                .map(ScreenPlayback::screens)
+                .unwrap_or_default(),
             screens,
             tabs: ScreenTabBar::default(),
             selected,
@@ -737,6 +769,8 @@ impl Player {
             session,
             wake,
             owner,
+            #[cfg(target_os = "linux")]
+            gamepad,
             stream_control_ui: StreamControlUi::default(),
             performance_mode,
             intercept_shortcuts: true,
@@ -769,6 +803,41 @@ impl Player {
         self.session.stream_control.mouse()
     }
 
+    #[cfg(target_os = "linux")]
+    fn gamepad_deadline(&self) -> Option<Instant> {
+        self.gamepad.deadline()
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn gamepad_deadline(&self) -> Option<Instant> {
+        None
+    }
+
+    /// `active` is this window's input gate, not only focus.
+    fn poll_gamepad(&mut self, window: &Window) {
+        #[cfg(target_os = "linux")]
+        {
+            let active = self.focused
+                && window.is_minimized() != Some(true)
+                && self.video_size.is_some()
+                && !self.input_blocked
+                && !self.stream_control_ui.open
+                && !self.tabs.is_pending()
+                && self.input().mode() != MouseMode::View
+                && !self.input().waiting_for_neutral();
+            self.gamepad.tick(active);
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = window;
+        }
+    }
+
+    fn pause_gamepad(&mut self) {
+        #[cfg(target_os = "linux")]
+        self.gamepad.pause();
+    }
+
     /// True when a decoded frame is waiting to go up.
     fn poll(&mut self) -> Result<bool> {
         self.confirm_neutral();
@@ -797,9 +866,8 @@ impl Player {
 
     fn publish(&mut self, frame: &DecodedVideoFrame, transfer: Duration) {
         self.video_size = Some((frame.width, frame.height, frame.rotation));
-        self.session
-            .performance
-            .record_rendered_frame(crate::diagnostics::performance::RenderedFrameTiming {
+        self.session.performance.record_rendered_frame(
+            crate::diagnostics::performance::RenderedFrameTiming {
                 is_new_picture: frame.is_new_picture,
                 width: frame.width,
                 height: frame.height,
@@ -817,7 +885,8 @@ impl Player {
                 sender_pacer: frame.sender_timing.pacer_delay,
                 sender_total: frame.sender_timing.sending_delay,
                 transport: frame.sender_timing.transport_delay,
-            });
+            },
+        );
     }
 
     /// Rotation swaps the aspect the video should be fitted to.
@@ -954,6 +1023,7 @@ impl Player {
             || display_blocked
             || control.pending_display_resolution(screen_id).is_some();
         if blocked && !self.input_blocked {
+            self.pause_gamepad();
             self.release_keys();
             self.input().pause_owner(self.owner);
         }
@@ -1287,6 +1357,7 @@ impl Player {
     fn on_focus_changed(&mut self, window: &Arc<Window>, focused: bool) {
         self.focused = focused;
         if !focused {
+            self.pause_gamepad();
             self.annotation.finish();
             self.release_pointer(window);
             // A key released while another window has focus never reaches us.
@@ -1316,7 +1387,9 @@ impl Player {
                     return false;
                 }
                 let down = event.state == ElementState::Pressed;
-                if let Some(key) = crate::application::viewer_shortcuts::physical_key(event.physical_key) {
+                if let Some(key) =
+                    crate::application::viewer_shortcuts::physical_key(event.physical_key)
+                {
                     if down {
                         if !self.physical_keys.contains(&key) {
                             self.physical_keys.push(key);
@@ -1337,7 +1410,9 @@ impl Player {
                 if ui_owns_keys || self.input_blocked || self.input().mode() == MouseMode::View {
                     return false;
                 }
-                let Some(key) = crate::application::viewer_shortcuts::physical_key(event.physical_key) else {
+                let Some(key) =
+                    crate::application::viewer_shortcuts::physical_key(event.physical_key)
+                else {
                     return false;
                 };
                 if down {
@@ -1444,6 +1519,47 @@ impl Player {
         }
     }
 
+    /// Hands a touchscreen contact to the remote. False leaves it to egui.
+    fn touch(
+        &mut self,
+        context: &egui::Context,
+        _window: &Arc<Window>,
+        touch: &winit::event::Touch,
+    ) -> bool {
+        // A local UI owning input keeps new contacts local. Contacts that are
+        // already down still lift, because `spot` is `None` and the forwarder
+        // keeps them tracked.
+        let spot = (!self.input_blocked && !self.stream_control_ui.open)
+            .then(|| self.map_touch(context, touch.location))
+            .flatten();
+        super::touch::forward(self.control(), self.owner, touch, spot)
+    }
+
+    fn map_touch(
+        &self,
+        context: &egui::Context,
+        position: PhysicalPosition<f64>,
+    ) -> Option<(i32, f64, f64)> {
+        if !self.hit_video(context, position) {
+            return None;
+        }
+        let rect = self.video_rect?;
+        let (screen, remote_width, remote_height) =
+            self.control().mouse_screen(self.session.track_index)?;
+        let local_x = (position.x / f64::from(self.scale_factor())) - f64::from(rect.min.x);
+        let local_y = (position.y / f64::from(self.scale_factor())) - f64::from(rect.min.y);
+        let width = f64::from(rect.width());
+        let height = f64::from(rect.height());
+        if width <= 0.0 || height <= 0.0 {
+            return None;
+        }
+        let x = (local_x.clamp(0.0, width - 1.0) / width)
+            .min(1.0 - 1.0 / f64::from(remote_width.max(1)));
+        let y = (local_y.clamp(0.0, height - 1.0) / height)
+            .min(1.0 - 1.0 / f64::from(remote_height.max(1)));
+        Some((screen, x, y))
+    }
+
     fn run_shortcut(&mut self, action: ViewerShortcut, window: &Arc<Window>) {
         match action {
             ViewerShortcut::ReleaseMouse => self.set_control(false),
@@ -1543,8 +1659,10 @@ impl Player {
             .filter(|_| self.pointer_in_video)
             .map(|p| {
                 (
-                    ((p.x / scale - f64::from(rect.min.x)) / f64::from(rect.width())).clamp(0.0, 1.0),
-                    ((p.y / scale - f64::from(rect.min.y)) / f64::from(rect.height())).clamp(0.0, 1.0),
+                    ((p.x / scale - f64::from(rect.min.x)) / f64::from(rect.width()))
+                        .clamp(0.0, 1.0),
+                    ((p.y / scale - f64::from(rect.min.y)) / f64::from(rect.height()))
+                        .clamp(0.0, 1.0),
                 )
             })
             .unwrap_or((0.5, 0.5));
@@ -1621,6 +1739,7 @@ impl Player {
 
 impl Drop for Player {
     fn drop(&mut self) {
+        self.pause_gamepad();
         self.release_keys();
         self.input().disable();
         self.annotation.finish();
@@ -1836,7 +1955,8 @@ impl Player {
         let bound = selected.is_some_and(|screen| {
             self.session.track_index == screen.video_track_index
                 && self.session.screen_binding()
-                    == (screen.id as u32 as u64 | ((screen.display.screen_type as u32 as u64) << 32))
+                    == (screen.id as u32 as u64
+                        | ((screen.display.screen_type as u32 as u64) << 32))
         });
         if bound {
             return;

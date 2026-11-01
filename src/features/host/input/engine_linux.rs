@@ -84,6 +84,9 @@ pub(crate) struct Engine {
     geometry: Geometry,
     unsupported_text: bool,
     virtual_keyboard: Option<virtual_keyboard::Keyboard>,
+    /// Primary contact followed as the left button. This host has no uinput
+    /// touchscreen, so a native frame becomes pointer motion plus one click.
+    touch: TouchFollow,
 }
 impl Engine {
     pub fn new(
@@ -102,6 +105,7 @@ impl Engine {
             geometry: Geometry::default(),
             unsupported_text: false,
             virtual_keyboard: virtual_keyboard::Keyboard::connect_optional(),
+            touch: TouchFollow::default(),
         })
     }
     pub fn backend(&self) -> &'static str {
@@ -275,8 +279,20 @@ impl Engine {
                     }
                 }
             }
-            Event::Touch { .. } => {
-                tracing::debug!("忽略 Linux 不支持的触摸事件");
+            Event::Touch { kind, points } => {
+                let samples: Vec<(u32, f64, f64)> =
+                    points.iter().map(|p| (p.id, p.x, p.y)).collect();
+                match self.touch.step(kind, &samples) {
+                    TouchFollowAction::Idle => {}
+                    TouchFollowAction::Release => self.button(1, false)?,
+                    TouchFollowAction::Move { x, y } => {
+                        self.absolute(Some(self.geometry.current), x, y)?;
+                    }
+                    TouchFollowAction::Down { x, y } => {
+                        self.absolute(Some(self.geometry.current), x, y)?;
+                        self.button(1, true)?;
+                    }
+                }
             }
         }
         Ok(())
@@ -302,6 +318,77 @@ impl Engine {
         }
         self.keys.clear();
         self.buttons.clear();
+        self.touch = TouchFollow::default();
         failure.map_or(Ok(()), Err)
+    }
+}
+
+/// One contact followed as the pointer. Extra fingers in the same frame are
+/// ignored. A real multitouch device (ABS_MT) is not created here.
+#[derive(Default)]
+struct TouchFollow {
+    id: Option<u32>,
+}
+
+enum TouchFollowAction {
+    Idle,
+    Down { x: f64, y: f64 },
+    Move { x: f64, y: f64 },
+    Release,
+}
+
+impl TouchFollow {
+    fn step(&mut self, kind: u8, points: &[(u32, f64, f64)]) -> TouchFollowAction {
+        if kind >= 3 || points.is_empty() {
+            return if self.id.take().is_some() {
+                TouchFollowAction::Release
+            } else {
+                TouchFollowAction::Idle
+            };
+        }
+        let chosen = self
+            .id
+            .and_then(|id| points.iter().find(|point| point.0 == id))
+            .or(points.first());
+        let Some(&(id, x, y)) = chosen else {
+            return TouchFollowAction::Idle;
+        };
+        if !(0.0..=1.0).contains(&x) || !(0.0..=1.0).contains(&y) {
+            return TouchFollowAction::Idle;
+        }
+        let was_down = self.id.is_some();
+        self.id = Some(id);
+        if was_down {
+            TouchFollowAction::Move { x, y }
+        } else {
+            TouchFollowAction::Down { x, y }
+        }
+    }
+}
+
+#[cfg(test)]
+mod touch_follow_tests {
+    use super::*;
+
+    #[test]
+    fn primary_contact_presses_moves_and_lifts() {
+        let mut follow = TouchFollow::default();
+        assert!(matches!(
+            follow.step(1, &[(4, 0.25, 0.5)]),
+            TouchFollowAction::Down { x, y } if x == 0.25 && y == 0.5
+        ));
+        // A second finger does not replace the contact already held.
+        assert!(matches!(
+            follow.step(2, &[(4, 0.3, 0.4), (9, 0.9, 0.9)]),
+            TouchFollowAction::Move { x, y } if x == 0.3 && y == 0.4
+        ));
+        assert!(matches!(follow.step(3, &[]), TouchFollowAction::Release));
+        assert!(matches!(follow.step(3, &[]), TouchFollowAction::Idle));
+    }
+
+    #[test]
+    fn a_lift_with_no_contact_is_idle() {
+        let mut follow = TouchFollow::default();
+        assert!(matches!(follow.step(4, &[]), TouchFollowAction::Idle));
     }
 }

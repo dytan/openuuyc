@@ -27,6 +27,8 @@ mod stream_menu;
 mod annotation;
 mod display_transition;
 mod polling_warning;
+#[cfg(not(windows))]
+mod touch;
 
 #[cfg(windows)]
 mod windows_cursor;
@@ -35,9 +37,9 @@ mod windows_cursor;
 mod windows_keyboard;
 
 #[cfg(windows)]
-mod windows_mouse;
-#[cfg(windows)]
 mod windows_drag;
+#[cfg(windows)]
+mod windows_mouse;
 
 #[cfg(windows)]
 pub(crate) mod windows_presenter;
@@ -45,6 +47,8 @@ pub(crate) mod windows_presenter;
 // keep using the `windows_presenter` path.
 #[cfg(not(windows))]
 mod linux_chrome;
+#[cfg(target_os = "linux")]
+mod linux_gamepad;
 #[cfg(not(windows))]
 #[path = "linux_presenter.rs"]
 pub(crate) mod windows_presenter;

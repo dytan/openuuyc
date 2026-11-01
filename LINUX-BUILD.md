@@ -72,6 +72,10 @@ sudo dnf install \
   per distro policy if mounts fail).
 - **Fonts**: Simplified Chinese UI expects Noto Sans CJK SC. For
   `NotoSansCJK-Regular.ttc` the face index is **2** (0=JP 1=KR 2=SC 3=TC 4=HK).
+- **Gamepad at runtime** (not a link dependency): `libSDL2-2.0.so.0`
+  (`sdl2` on Arch, `libsdl2-2.0-0` on Debian/Ubuntu). SteamOS already has it.
+  The viewer `dlopen`s it when a session owns input. Without the library,
+  keyboard and mouse still work.
 
 ## Build
 
