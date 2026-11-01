@@ -46,7 +46,7 @@ controller.
 
 | Feature | Linux status |
 |---------|--------------|
-| Host / agent (本机被控) | **Works** since v0.8.0 — wlroots-family Wayland and X11 capture, VA-API or software H.264, uinput, clipboard, file receive (Send and viewer drag-drop → `~/Downloads`), desktop audio. Non-ASCII / IME text uses `zwp_virtual_keyboard_v1` where the compositor offers it (not X11, not GNOME). GNOME/KDE Wayland capture is not supported yet |
+| Host / agent (本机被控) | **Works** since v0.8.0 — wlroots-family Wayland (default) and X11 capture, VA-API or software H.264, uinput, clipboard, file receive (Send and viewer drag-drop → `~/Downloads`), desktop audio. Non-ASCII / IME text uses `zwp_virtual_keyboard_v1` where the compositor offers it (not X11, not GNOME). GNOME/KDE Wayland uses the ScreenCast portal when `wlr-screencopy` is absent (`OPENUUYC_CAPTURE=portal` to force it). Shared-memory / KDE MemFd only; DMA-BUF portal buffers are not imported |
 | Audio playback (remote → local) | Works (cpal / ALSA) |
 | Microphone (local → remote) | Works (cpal; soak may vary by device) |
 | File transfer (dual-pane) | Works (XDG places); some Windows ACL/path checks are cfg-gated |

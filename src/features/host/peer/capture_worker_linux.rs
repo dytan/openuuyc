@@ -495,7 +495,13 @@ pub(super) fn capture_loop(
             }
             let encoded = if zerocopy && active_encoder.vpp_available() {
                 // Tier 1: zero-copy dmabuf capture straight into a VA surface.
-                if dmabuf_cap.is_none() {
+                // That path is wlr-screencopy. Skip it for a portal session so
+                // GNOME/KDE do not try a missing protocol, and an explicit
+                // portal on Hyprland does not capture twice.
+                let wlr_backend = desktop
+                    .as_ref()
+                    .is_some_and(|desktop| desktop.backend_name() == "wlr-screencopy");
+                if wlr_backend && dmabuf_cap.is_none() {
                     if let Some(display) = active_encoder.va_display() {
                         match crate::platform::linux::host::dmabuf::DmabufCapture::open(
                             display,
@@ -512,7 +518,9 @@ pub(super) fn capture_loop(
                     }
                 }
                 let mut dmabuf_done: Option<Result<Vec<_>>> = None;
-                if let Some(cap) = dmabuf_cap.as_mut() {
+                if wlr_backend
+                    && let Some(cap) = dmabuf_cap.as_mut()
+                {
                     let cursor = !crate::platform::linux::host::pointer::available();
                     match cap.grab(cursor, Duration::from_millis(u64::from(wait_ms) + 60)) {
                         Ok(Some((src_id, sw, sh))) => {
