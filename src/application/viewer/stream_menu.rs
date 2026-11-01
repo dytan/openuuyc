@@ -992,6 +992,7 @@ crate::ui::controls::observe_notice(ui.ctx(), "audio-output-disconnected", "音�
                                 }
                                 let clip = clipboard.snapshot();
                                 let mut enabled = clip.enabled;
+                                // Same per-device preference as the Linux player title-bar button.
                                 if switch_row(ui, "剪贴板同步", &mut enabled)
                                     .on_hover_text("为此设备记住开关；键鼠控制就绪且对端允许时同步，不保存剪贴板内容")
                                     .changed() {

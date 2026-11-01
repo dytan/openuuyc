@@ -23,6 +23,13 @@ PR1 tip: `eb51212` in a sibling checkout of the DoyoDia linux-port branch.
 - Auth/GL soak notes and handoff docs on this branch
 - `cros-libva` patch for newer libva headers (`seg_id_block_size` / `va_reserved8`)
 
+## Adopted from farwing beta.5 / linux-port (selective)
+
+- Linux player title bar: clipboard sync toggle, wired to the existing
+  `set_clipboard_enabled` path (same device preference as 串流设置). Not a
+  rebase of the linux-port tree. Windows caption in this fork is unchanged
+  (stream settings only). Fullscreen still hides the whole caption.
+
 ## What PR1 still suggests next
 
 - dmabuf zero-copy (both trees still read back VA surfaces to CPU NV12)

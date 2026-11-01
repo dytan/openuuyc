@@ -979,3 +979,26 @@ fn unavailable(req: Request) -> Option<Envelope> {
     };
     Some(response(id, kind))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Clipboard;
+
+    #[test]
+    fn clipboard_sync_off_keeps_text_image_and_files_inactive() {
+        let clip = Clipboard::new();
+        clip.set_files(true);
+        clip.set_enabled(false)
+            .expect("disabling does not start the native clipboard");
+        // Peer ready and file clipboard allowed; the master switch still holds.
+        clip.policy(true, true);
+        let snap = clip.snapshot();
+        assert!(!snap.enabled);
+        assert!(snap.files, "file preference is remembered separately");
+        assert!(!snap.active);
+        assert!(
+            !clip.drop_available(),
+            "viewer file drop shares the clipboard session"
+        );
+    }
+}

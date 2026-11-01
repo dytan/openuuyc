@@ -22,7 +22,7 @@ FUSE and publish `text/uri-list` / X11 offer.
 - **`clipboard_files` connection default** (was missing vs PR1): media options +
   profile, CLI `--clipboard-files`, center UI 「文件复制」, and
   `clipboard.set_files(profile.clipboard_files)` at stream-control create.
-- Text/image 「剪贴板同步」 defaults on; player menu can still disable it. 「文件复制」 stays opt-in.
+- Text/image 「剪贴板同步」 defaults on. The Linux player title bar and the stream-settings row toggle the same per-device flag (`set_clipboard_enabled`). Off suspends text, image, and file-clipboard traffic, including viewer file drop (it needs an active clipboard session). 「文件复制」 stays a separate opt-in and is not changed by the title-bar button.
 - Clipboard-ready diagnostic (`剪贴板同步条件`) when the gate flips.
 
 ## Remaining
