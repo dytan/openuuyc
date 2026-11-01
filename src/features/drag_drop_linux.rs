@@ -1,7 +1,8 @@
-//! OpenUUYC's negotiated native drag (OLE drag source/target on both ends) is
-//! Windows-only. On Linux the channel stays inert: peers see no native drag
-//! capability, and dropping files onto the viewer goes through the official
-//! clipboard file drop (`StreamControlHandle::drop_files`) instead.
+//! Controller-side negotiated drag stays inert on Linux: this process does not
+//! drive a remote OLE/XDND target. Dropping local files on the viewer window
+//! uses the clipboard file drop (`StreamControlHandle::drop_files_unadvertised`).
+//! The Linux *host* answers the same channel from `host::clipboard` (`drag_sink`)
+//! and writes the files under Downloads.
 pub(crate) mod controller {
     use anyhow::Result;
     use std::sync::Arc;

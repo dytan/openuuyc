@@ -681,8 +681,8 @@ fn process(state: &mut State, command: Command) {
                     "收到远端剪贴板 FormatList"
                 );
                 let result = if let Some(action) = action {
-                    // OleDrop/AutoSave: save into Downloads (drag path; skipped for now
-                    // in product priority, but keep the handler so drops are not lost).
+                    // OleDrop/AutoSave: save into Downloads. Native drag rewrites its
+                    // file offer into this same action so both gestures share it.
                     receive_drop(session.clone(), epoch, formats, action)
                 } else {
                     // Fetch + write must not block this worker: session.data() waits on
@@ -731,6 +731,15 @@ fn process(state: &mut State, command: Command) {
     }
 }
 
+fn signal_file_drop(
+    session: &Inner,
+    result: Result<crate::features::file_transfer::import::Report>,
+) {
+    if let Some(hook) = lock(&session.file_drop_hook).take() {
+        hook(result.map_err(|error| error.to_string()));
+    }
+}
+
 /// Write an official file-drop (OleDrop / AutoSave) into the user's Downloads
 /// folder. Runs on a worker thread so the native clipboard loop can keep
 /// pumping FileContents responses that `read_file` waits on.
@@ -740,16 +749,24 @@ fn receive_drop(
     formats: Vec<ClipboardFormat>,
     action: ClipboardFormatListRequestKind,
 ) -> Result<()> {
-    ensure!(session.file_allowed(), "文件剪贴板已关闭");
-    let has_files = formats.iter().any(|f| {
-        formats::incoming(f.clone(), session.platform.load(Ordering::Acquire), true)
-            .is_some_and(|link| link.local == descriptor_format())
-    });
-    ensure!(has_files, "拖放未包含文件");
-    std::thread::Builder::new()
+    if let Err(error) = (|| -> Result<()> {
+        ensure!(session.file_allowed(), "文件剪贴板已关闭");
+        let has_files = formats.iter().any(|f| {
+            formats::incoming(f.clone(), session.platform.load(Ordering::Acquire), true)
+                .is_some_and(|link| link.local == descriptor_format())
+        });
+        ensure!(has_files, "拖放未包含文件");
+        Ok(())
+    })() {
+        signal_file_drop(&session, Err(anyhow!("{error:#}")));
+        return Err(error);
+    }
+    let worker = session.clone();
+    if let Err(error) = std::thread::Builder::new()
         .name("linux file drop".into())
         .spawn(move || {
-            let result = (|| -> Result<()> {
+            let session = worker;
+            let result = (|| -> Result<crate::features::file_transfer::import::Report> {
                 const TASK: u32 = 0;
                 let descriptors = session.descriptors(epoch, TASK)?;
                 ensure!(!descriptors.is_empty(), "远端拖放文件列表为空");
@@ -810,7 +827,9 @@ fn receive_drop(
                         ),
                     );
                 }
-                report?;
+                if report.is_err() {
+                    return report;
+                }
                 tracing::info!(
                     total = count,
                     saved,
@@ -828,13 +847,20 @@ fn receive_drop(
                     .arg("OpenUUYC 文件拖放")
                     .arg(body)
                     .status();
-                Ok(())
+                Ok(report?)
             })();
-            if let Err(error) = result {
-                tracing::warn!(error = format!("{error:#}"), "linux official file drop failed");
-                session.fail(error.to_string());
+            match result {
+                Ok(report) => signal_file_drop(&session, Ok(report)),
+                Err(error) => {
+                    tracing::warn!(error = format!("{error:#}"), "linux official file drop failed");
+                    session.fail(error.to_string());
+                    signal_file_drop(&session, Err(error));
+                }
             }
-        })?;
+        }) {
+        signal_file_drop(&session, Err(anyhow!("无法启动文件接收线程: {error}")));
+        return Err(error.into());
+    }
     Ok(())
 }
 

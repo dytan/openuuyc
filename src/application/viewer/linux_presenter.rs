@@ -1549,7 +1549,9 @@ impl Player {
             })
             .unwrap_or((0.5, 0.5));
         let point = crate::protocol::drag_drop::Point { screen, x, y };
-        match self.session.stream_control.drop_files(paths, point) {
+        // The feature map hides FileDrop from this engine version. The host
+        // still accepts the clipboard drop (Downloads) or native drag.
+        match self.session.stream_control.drop_files_unadvertised(paths, point) {
             Ok(_submission) => self.control_error = None,
             Err(error) => self.control_error = Some(format!("{error:#}")),
         }

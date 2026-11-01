@@ -94,7 +94,15 @@ struct Inner {
     incoming_drops: AtomicU32,
     drop_pointer: AtomicU32,
     host_role: AtomicBool,
+    /// Set by the Linux host drag sink. Fired once when an OleDrop import
+    /// finishes, from the thread that wrote the files.
+    file_drop_hook: Mutex<Option<FileDropHook>>,
 }
+pub(crate) type FileDropHook = Arc<
+    dyn Fn(std::result::Result<crate::features::file_transfer::import::Report, String>)
+        + Send
+        + Sync,
+>;
 static SEND_BYTES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 struct SendBudget(usize);
 impl Drop for SendBudget {
@@ -183,6 +191,55 @@ impl Clipboard {
     pub(crate) fn host_role(&self) {
         self.0.host_role.store(true, Ordering::Release);
     }
+    /// Accept peer clipboard messages without publishing the local clipboard.
+    /// The worker must be running (`set_enabled` starts it) but this session
+    /// stays out of the observation set, so a drag import is not mixed with
+    /// whatever the user has copied.
+    pub(crate) fn arm_receiver(&self) -> Result<()> {
+        self.set_enabled(true)?;
+        self.set_files(true);
+        self.0.allowed_files.store(true, Ordering::Release);
+        self.0.active.store(true, Ordering::Release);
+        Ok(())
+    }
+    pub(crate) fn on_file_drop(&self, hook: FileDropHook) {
+        *lock(&self.0.file_drop_hook) = Some(hook);
+    }
+    /// A native-drag file offer arrives as an ordinary FormatList. Mark it as
+    /// an OleDrop so the Linux host writes it to Downloads immediately, instead
+    /// of the shared offer sequence used for copy/paste.
+    pub(crate) fn note_file_drop(bytes: &[u8]) -> Vec<u8> {
+        let Ok(mut envelope) = Envelope::decode(bytes) else {
+            return bytes.to_vec();
+        };
+        let Some(request) = envelope.request.as_mut() else {
+            return bytes.to_vec();
+        };
+        let Some(clip) = request.clip.as_mut() else {
+            return bytes.to_vec();
+        };
+        let Some(ClipboardRequestKind::FormatList(list)) = clip.which.as_mut() else {
+            return bytes.to_vec();
+        };
+        if list.has_action != 0 || list.drag_drop_action.is_some() {
+            return bytes.to_vec();
+        }
+        let files = list.formats.iter().any(|format| {
+            format.name.eq_ignore_ascii_case("FileGroupDescriptorW")
+                || format.name.eq_ignore_ascii_case("FileContents")
+                || formats::file_format(format.id, &format.name)
+        });
+        if !files {
+            return bytes.to_vec();
+        }
+        list.has_action = 1;
+        list.drag_drop_action = Some(ClipboardFormatListRequestKind::OleDrop(DragDropOleDrop {
+            target_x: 0.5,
+            target_y: 0.5,
+            screen_id: 0,
+        }));
+        envelope.encode_to_vec()
+    }
     pub fn new() -> Self {
         Self::guarded(None)
     }
@@ -221,6 +278,7 @@ impl Clipboard {
             incoming_drops: AtomicU32::new(0),
             drop_pointer: AtomicU32::new(0),
             host_role: AtomicBool::new(false),
+            file_drop_hook: Mutex::new(None),
         }))
     }
     pub(crate) async fn publish_files(
