@@ -46,7 +46,7 @@ controller.
 
 | Feature | Linux status |
 |---------|--------------|
-| Host / agent (本机被控) | **Works** since v0.8.0 — wlroots-family Wayland and X11 capture, VA-API or software H.264, uinput, clipboard, file receive (Send and viewer drag-drop → `~/Downloads`), desktop audio. GNOME/KDE Wayland capture is not supported yet |
+| Host / agent (本机被控) | **Works** since v0.8.0 — wlroots-family Wayland and X11 capture, VA-API or software H.264, uinput, clipboard, file receive (Send and viewer drag-drop → `~/Downloads`), desktop audio. Non-ASCII / IME text uses `zwp_virtual_keyboard_v1` where the compositor offers it (not X11, not GNOME). GNOME/KDE Wayland capture is not supported yet |
 | Audio playback (remote → local) | Works (cpal / ALSA) |
 | Microphone (local → remote) | Works (cpal; soak may vary by device) |
 | File transfer (dual-pane) | Works (XDG places); some Windows ACL/path checks are cfg-gated |

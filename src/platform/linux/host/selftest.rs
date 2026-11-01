@@ -117,6 +117,7 @@ pub fn run(bench: Option<u32>) -> Result<String> {
     } else {
         line!("uinput: /dev/uinput 不存在（加载 uinput 内核模块）");
     }
+    line!("{}", super::virtual_keyboard::status_line());
 
     // Optional steady-state benchmark: capture -> scale/convert -> encode,
     // reporting per-stage p50/p95 and the achievable (CPU-bound) frame rate.

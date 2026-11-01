@@ -42,7 +42,18 @@ controller.
   elsewhere.
 - **Input injection.** A virtual mouse+keyboard through `uinput`
   (absolute pointer over the full layout, relative motion, buttons, wheel with
-  hi-res, keys, and US-ASCII text). Needs permission to `/dev/uinput`.
+  hi-res, and keys). Printable US-ASCII `text_input` uses the same `uinput`
+  key codes. Needs permission to `/dev/uinput`.
+- **Non-ASCII / IME text.** On a Wayland compositor that advertises
+  `zwp_virtual_keyboard_manager_v1` (wlroots family: Hyprland, Sway, river,
+  labwc, Wayfire), a `text_input` commit that contains anything outside
+  US-ASCII is injected with a one-shot xkb keymap on `zwp_virtual_keyboard_v1`.
+  That is the DoyoDia linux-port text path. The whole commit goes through the
+  virtual keyboard, so CJK and the ASCII around it stay in order and do not
+  depend on the host keymap. ASCII **key** events (`kbd_press` / `kbd_release`)
+  stay on `uinput`. A commit that is entirely US-ASCII stays on `uinput` too.
+  Each character is paced by a few milliseconds so a host input method does not
+  drop the burst. No extra udev rule: the compositor exposes the protocol.
 - **Clipboard sync (text, images, files).** Bidirectional between the Linux host
   and the controller, using the Windows clipboard dialect so Windows **and** macOS
   controllers interoperate. Text and images paste both ways. A file copied on
@@ -71,7 +82,13 @@ controller.
 - Virtual / headless displays, resolution & DPI changes, multi-monitor topology
   journaling (physical outputs only).
 - Remote microphone playback into the host (accepted on the wire, dropped).
-- Non-ASCII / IME text injection (evdev is layout-unaware).
+- **Non-ASCII text where virtual-keyboard is missing.** X11, XWayland windows,
+  and Wayland compositors that do not implement `zwp_virtual_keyboard_v1`
+  (GNOME/Mutter does not) still type US-ASCII through `uinput` and skip other
+  characters. A clipboard Ctrl+V fallback was not added: it would overwrite the
+  synced clipboard and miss terminals and other clients that do not paste with
+  Ctrl+V. Upstream's X11 answer is an XTest keysym rebind; this host does not
+  have that injector, and XWayland clients ignore a custom virtual keymap.
 - Windows system chords (Win+D, Task View, Ctrl+Alt+Del on the host).
 - GNOME/KDE Wayland capture (portal ScreenCast).
 
@@ -102,9 +119,10 @@ Screen capture and audio need no root.
 
     OpenUUYC host-selftest
 
-Enumerates outputs, captures a frame, encodes → decodes it, and probes
-`/dev/uinput`, printing a short report. Use it to confirm the local half before
-asking a controller to connect.
+Enumerates outputs, captures a frame, encodes → decodes it, probes
+`/dev/uinput`, and reports whether `zwp_virtual_keyboard_manager_v1` is
+advertised. Use it to confirm the local half before asking a controller to
+connect.
 
 ## Connection test plan (needs a second device)
 
@@ -113,7 +131,8 @@ asking a controller to connect.
 2. From a Windows or Mac controller signed into the same account, connect to the
    Linux device.
 3. Check, in order: video appears; mouse moves and clicks land where expected;
-   keyboard types; scroll works; desktop audio is heard (if enabled).
+   keyboard types ASCII; scroll works; desktop audio is heard (if enabled).
+   For CJK / IME, use the retest below.
 4. **File paste, Linux → controller.** On the Hyprland host, copy one small file
    in the file manager (not a screenshot). On the Windows controller, paste into
    Explorer. The file should appear with its name, bytes, and a modification
@@ -203,3 +222,26 @@ what the app reports as its version string. `Cargo.toml` stays at that engine
 version. `v0.8.1` is the Linux packaging tag, not the engine version. The
 upstream project is now **Farwing**
 ([djkcyl/farwing](https://github.com/djkcyl/farwing)).
+
+## Retest: non-ASCII / IME text
+
+A cloud VM has no controller and no compositor to type into. On a real
+wlroots session (Hyprland is the one this host is aimed at):
+
+1. Log in, confirm `/dev/uinput` is writable, turn on *允许被控*.
+   `OpenUUYC host-selftest` should report `zwp_virtual_keyboard: 可用`.
+2. From a Windows, Mac, or phone controller on the same account, connect and
+   focus a **native Wayland** text field (a terminal or browser on Wayland,
+   not an XWayland app).
+3. Type ASCII from the controller keyboard: letters, Shift, and shortcuts still
+   go through `uinput` and should land as they did before.
+4. Commit CJK from the controller IME, for example `你好`, then a mixed commit
+   such as `你好abc`. The characters should appear in that order in the focused
+   field. A longer paste (more than 56 distinct characters) should still arrive
+   whole.
+5. Repeat on X11, or on GNOME Wayland: ASCII still types; non-ASCII is skipped
+   and the host log says `zwp_virtual_keyboard_v1 is not available`. The input
+   session itself should stay up (mouse and keys keep working).
+6. If a modifier is still held on the controller when the IME commits, release
+   it first. The virtual keyboard clears its own modifiers and does not lift
+   keys held on the `uinput` device.
