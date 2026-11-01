@@ -1,6 +1,6 @@
 //! Player caption for X11 and Wayland: the same row as the Windows player
-//! (device switcher, screen tabs, stream metrics, annotation, 1:1, microphone,
-//! input control) drawn with the shared caption controls.
+//! (device switcher, screen tabs, stream metrics, annotation, 1:1, clipboard,
+//! microphone, input control) drawn with the shared caption controls.
 //!
 //! Screen tabs switch the single player window between screens. Detaching a
 //! tab into its own window is Windows-only: it relies on pointer capture
@@ -174,7 +174,9 @@ pub(super) fn player_title_bar(ui: &mut egui::Ui, bar: PlayerTitleBar<'_>) -> Pl
             crate::ui::theme::WINDOW_TITLE_CONTENT_HEIGHT,
         ),
     );
-    // No plugin host on Linux: one caption slot fewer than Windows.
+    // Clipboard uses the caption slot Windows spends on the plugin button.
+    // VIEWER_ACTIONS_WIDTH fits six caption buttons; another one needs a wider strip
+    // or the leftmost control (mouse) is clipped.
     const VIEW_ACTIONS_WIDTH: f32 = crate::ui::theme::VIEWER_ACTIONS_WIDTH;
     let title = bar.title.trim_start_matches(crate::VIEWER_TITLE_PREFIX);
     let title_width = if bar.screens.device_switch.is_some() {
@@ -366,7 +368,52 @@ pub(super) fn player_title_bar(ui: &mut egui::Ui, bar: PlayerTitleBar<'_>) -> Pl
         .inner
         .on_disabled_hover_text("请先还原窗口")
         .clicked();
+    // Right-to-left: the clipboard button is added before the microphone so it
+    // sits on the microphone's right, matching the farwing caption. It is the
+    // same per-device switch as 串流设置 → 剪贴板同步 (`set_clipboard_enabled`).
     let control = bar.stream_control.snapshot();
+    let clip = bar.stream_control.clipboard().snapshot();
+    let clip_hint = if !clip.enabled {
+        "同步剪贴板：把本机剪贴板发送到远端，并把远端剪贴板取回本机".to_owned()
+    } else if let Some(error) = clip.error.as_deref() {
+        error.to_owned()
+    } else if clip.active {
+        "剪贴板同步中，点击关闭".to_owned()
+    } else {
+        "剪贴板同步已开启，等待通道就绪，点击关闭".to_owned()
+    };
+    if actions
+        .add_enabled_ui(
+            clip.enabled
+                || (control.ready
+                    && control.mouse_mode != crate::features::remote_input::MouseMode::View),
+            |ui| title_icon_button(ui, TitleIcon::Clipboard, clip.enabled, &clip_hint),
+        )
+        .inner
+        .on_disabled_hover_text("请先连接并开启键鼠控制")
+        .clicked()
+    {
+        crate::ui::controls::clear_notice(actions.ctx(), "clipboard-request-error");
+        match bar.stream_control.set_clipboard_enabled(!clip.enabled) {
+            Ok(()) => crate::ui::controls::clear_notice(actions.ctx(), "clipboard-error"),
+            Err(error) => crate::ui::controls::notice(
+                actions.ctx(),
+                "clipboard-request-error",
+                "剪贴板同步",
+                crate::ui::controls::DialogIcon::Error,
+                error.to_string(),
+            ),
+        }
+    }
+    if clip.enabled {
+        crate::ui::controls::observe_notice(
+            actions.ctx(),
+            "clipboard-error",
+            "剪贴板同步失败",
+            crate::ui::controls::DialogIcon::Error,
+            clip.error.as_deref(),
+        );
+    }
     let mic = bar.stream_control.microphone().snapshot();
     let mic_hint = if mic.pending {
         "麦克风：等待远端确认"

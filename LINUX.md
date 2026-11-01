@@ -24,7 +24,7 @@ setup are in [`LINUX-HOST.md`](LINUX-HOST.md). Current release notes:
 | Fonts | Noto Sans CJK SC via TTC **face index 2** (JP/KR/SC/TC/HK order) |
 | Instance lock | flock under `$XDG_RUNTIME_DIR` (uid-tagged `/tmp` fallback) |
 | Places | XDG user-dirs (`user-dirs.dirs`) for Desktop/Downloads/Documents |
-| Clipboard | **arboard** text/image + **FUSE** file offer (`clipboard_files`) adapted from DoyoDia PR1 |
+| Clipboard | **arboard** text/image + **FUSE** file offer (`clipboard_files`) adapted from DoyoDia PR1. The player title bar toggles clipboard sync for the session (same per-device switch as 串流设置) |
 
 ## Deferred / remaining
 
@@ -50,8 +50,8 @@ controller.
 | Audio playback (remote → local) | Works (cpal / ALSA) |
 | Microphone (local → remote) | Works (cpal; soak may vary by device) |
 | File transfer (dual-pane) | Works (XDG places); some Windows ACL/path checks are cfg-gated |
-| Clipboard text/image | Works (arboard) |
-| Clipboard files | **Partial** — controller FUSE offer (no AutoUnmount). Host → controller file paste serves `FileGroupDescriptorW` plus contents (task 0, Unix-second protobuf times); live Windows paste still needs a retest. Dragging a file onto the Linux host saves it under `~/Downloads`. See [`LINUX-HOST.md`](LINUX-HOST.md) |
+| Clipboard text/image | Works (arboard). Title-bar button toggles sync on/off during a session |
+| Clipboard files | **Partial** — controller FUSE offer (no AutoUnmount). Host → controller file paste serves `FileGroupDescriptorW` plus contents (task 0, Unix-second protobuf times); live Windows paste still needs a retest. Dragging a file onto the Linux host saves it under `~/Downloads`. The viewer title-bar switch is the master sync flag (text, image, and file clipboard together). 「文件复制」 in stream settings still gates files only, and is unchanged while sync is on. See [`LINUX-HOST.md`](LINUX-HOST.md) |
 | HW decode | **Partial** — VA-API H.264 + HEVC Main; Main10 missing; no dmabuf zero-copy (vs DXVA) |
 | Plugins / node graph | **Missing** — stub host |
 | Annotation branding | **Partial** — board works; GDI brand strokes empty |

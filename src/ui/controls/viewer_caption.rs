@@ -8,6 +8,9 @@ pub(crate) enum ViewerCaptionIcon {
     OneToOne,
     Mouse,
     Microphone,
+    /// Linux player caption. Windows keeps clipboard sync in the stream menu.
+    #[cfg(not(windows))]
+    Clipboard,
     Quality,
     Minimize,
     Maximize,
@@ -146,6 +149,21 @@ fn paint_caption_icon(
                     center + egui::vec2(4.5, -1.0),
                 ],
                 stroke,
+            );
+        }
+        #[cfg(not(windows))]
+        ViewerCaptionIcon::Clipboard => {
+            // A board with a clip, still recognizable at caption size.
+            let board =
+                egui::Rect::from_center_size(center + egui::vec2(0.0, 1.0), egui::vec2(11.0, 13.0));
+            painter.rect_stroke(board, 2.0, stroke, egui::StrokeKind::Inside);
+            painter.rect_filled(
+                egui::Rect::from_center_size(
+                    egui::pos2(center.x, board.top() + 1.0),
+                    egui::vec2(5.5, 3.5),
+                ),
+                1.0,
+                color,
             );
         }
         ViewerCaptionIcon::Quality => {
