@@ -81,16 +81,20 @@ impl NativePeer {
     pub(crate) fn port_mapping(&self) -> Arc<crate::features::port_mapping::Transport> {
         Arc::clone(&self.data_channels.port_mapping)
     }
+    pub(crate) fn terminal_transport(&self) -> Arc<crate::features::terminal::client::Transport> {
+        Arc::clone(&self.data_channels.terminal)
+    }
     pub async fn new(ice_servers: Vec<IceServer>, transport: TransportChoice) -> Result<Self> {
         let profile = crate::media::ConnectionMediaOptions::default()
             .resolve(crate::media::LocalDisplayInfo::FALLBACK)?;
-        Self::new_with_profile(ice_servers, transport, profile).await
+        Self::new_with_profile(ice_servers, transport, profile, false).await
     }
 
     pub(crate) async fn new_with_profile(
         mut ice_servers: Vec<IceServer>,
         transport: TransportChoice,
         profile: ConnectionMediaProfile,
+        terminal: bool,
     ) -> Result<Self> {
         let configured_ice_servers = ice_servers.clone();
         let mut ice_url_schemes = BTreeMap::<String, usize>::new();
@@ -216,6 +220,7 @@ impl NativePeer {
             profile,
             core.control.clone(),
             Arc::downgrade(&connection),
+            terminal,
         );
         let microphone = data_channels.stream_control.microphone().clone();
         data_channels.workers.spawn(async move {
@@ -926,6 +931,7 @@ impl NativePeer {
         self.data_channels.stream_control.diagnostics().close();
         self.data_channels.stream_control.clipboard().suspend();
         self.data_channels.port_mapping.close();
+        self.data_channels.terminal.close();
         self.data_channels.stream_control.mouse().close().await;
         self.data_channels.workers.close().await;
         self.data_channels.stream_control.audio().close().await;

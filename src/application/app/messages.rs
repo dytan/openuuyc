@@ -44,6 +44,10 @@ pub(super) enum GuiCommand {
         device: DeviceInfo,
         options: ConnectionMediaOptions,
     },
+    Terminal {
+        generation: u64,
+        device: DeviceInfo,
+    },
     Refresh,
     Login {
         generation: u64,

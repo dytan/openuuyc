@@ -25,7 +25,7 @@ setup are in [`LINUX-HOST.md`](LINUX-HOST.md). Current release notes:
 | Instance lock | flock under `$XDG_RUNTIME_DIR` (uid-tagged `/tmp` fallback) |
 | Places | XDG user-dirs (`user-dirs.dirs`) for Desktop/Downloads/Documents |
 | Clipboard | **arboard** text/image + **FUSE** file offer (`clipboard_files`) adapted from DoyoDia PR1. The player title bar toggles clipboard sync for the session (same per-device switch as 串流设置) |
-| Gamepad | **SDL2** standard controllers (Steam Input's virtual Xbox pad included). Rumble from `gpd_vibration`. Gamescope keeps sampling via `SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS` because this process has no SDL window. Needs `libSDL2-2.0.so.0` at runtime; without it, keys and the pointer still work |
+| Gamepad | **SDL2** standard controllers (Steam Input's virtual Xbox pad included). Rumble from `gpd_vibration`. Gamescope keeps sampling via `SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS` because this process has no SDL window. A Gamescope session also absolutizes `GAMESCOPE_WAYLAND_DISPLAY` / `WAYLAND_DISPLAY` for this process only, sets `WINIT_X11_SCALE_FACTOR=1` when unset, and tries to unlock the Secret Service wallet before the UI opens. Needs `libSDL2-2.0.so.0` at runtime; without it, keys and the pointer still work |
 | Touch | winit contacts on the picture. **Native** protobuf frames when the peer is an OpenUUYC host and the contact is on that host's current screen; otherwise the first finger is the left button |
 
 ## Deferred / remaining
@@ -49,7 +49,7 @@ controller.
 | Feature | Linux status |
 |---------|--------------|
 | Host / agent (本机被控) | **Works** since v0.8.0 — wlroots-family Wayland (default) and X11 capture, VA-API or software H.264, uinput, clipboard, file receive (Send and viewer drag-drop → `~/Downloads`), desktop audio. Non-ASCII / IME text uses `zwp_virtual_keyboard_v1` where the compositor offers it (not X11, not GNOME). GNOME/KDE Wayland uses the ScreenCast portal when `wlr-screencopy` is absent (`OPENUUYC_CAPTURE=portal` to force it). Shared-memory / KDE MemFd only; DMA-BUF portal buffers are not imported |
-| Audio playback (remote → local) | Works (cpal / ALSA) |
+| Audio playback (remote → local) | Works (cpal / ALSA). PulseAudio playback asks for a 20 ms period instead of the ~2 s default |
 | Microphone (local → remote) | Works (cpal; soak may vary by device) |
 | File transfer (dual-pane) | Works (XDG places); some Windows ACL/path checks are cfg-gated |
 | Clipboard text/image | Works (arboard). Title-bar button toggles sync on/off during a session |
@@ -61,6 +61,8 @@ controller.
 | Remote upgrade (official on target) | Works (API; target is Windows agent) |
 | Presence / “host room” online | **Works** for the host — 允许被控 calls `set_controllable(true)` and keeps room presence as a host (device still uses the generic platform id; see LINUX-HOST.md) |
 | Gamepad passthrough | **Controller only** — SDL2 `gpd_connect` / `gpd_update` / `gpd_disconnect` plus rumble. A Linux host accepts the messages and does not inject a virtual gamepad |
+| Remote terminal | **Works** — host shells (`kind = 8`) when 被控设置 → 终端 is on, plus a controller list/attach from the device page and `OpenUUYC terminal`. Local shells stay private unless the second grant is on. Root is refused |
+| Login autostart | **Works** — `app-openuuyc.service` on desktops that reach `graphical-session.target` (portal app id), XDG autostart otherwise. See [`LINUX-HOST.md`](LINUX-HOST.md) |
 | Touch passthrough | **Controller** sends native frames to an OpenUUYC host on the current screen (Windows host injects contacts). A Linux host follows the primary contact as pointer motion and the left button; it does not create a uinput touchscreen |
 | Screen privacy / blank host | **N/A** — not present as a client feature in this tree |
 | Low-level system-key hook | **Partial** — X11/Wayland focused-window keys only (no Win LL hook) |
@@ -102,6 +104,7 @@ On a machine with a controller and, for touch, a touchscreen:
 | M5 | Zero-copy VA↔wgpu / deeper soak | **next** (host has an experimental dmabuf encode path, off by default) |
 | M6 | Linux host (被控) | **done** in v0.8.0; v0.8.1 adds the sticky-image clipboard fix only |
 | M7 | Controller gamepad + touch | **done** for the viewer (SDL2 pad/rumble/Gamescope hint, native touch frames). Linux host gamepad injection and uinput multitouch are still open |
+| M8 | Remaining linux-port host pieces | **done** for uinput `uaccess`, portal autostart, Gamescope wallet, remote terminal, Pulse playback buffer, shortcut inhibit, idle inhibit while viewing. VKMS virtual screens and viewer drag-out are not in this tree |
 
 ## Docs
 

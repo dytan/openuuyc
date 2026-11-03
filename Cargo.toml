@@ -22,6 +22,7 @@ base64 = "0.22.1"
 bytes = "1.11.1"
 crossbeam-queue = "0.3.14"
 cpal = "0.18.2"
+vt100 = "0.16"
 clap = { version = "4.6.7", features = ["derive"] }
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 dunce = "1.0"
@@ -150,9 +151,13 @@ egui-winit = { version = "0.36.1", default-features = false, features = ["clipbo
 winit = { version = "0.30.13", default-features = false, features = ["rwh_06", "x11", "wayland", "wayland-dlopen"] }
 arboard = { version = "3.6.1", default-features = false, features = ["image-data", "wayland-data-control"] }
 libc = "0.2"
+cpal = { version = "0.18.2", features = ["pulseaudio"] }
 fuser = { version = "0.15", default-features = false }
-x11rb = "0.13"
+x11rb = { version = "0.13", features = ["allow-unsafe-code", "dpms", "xtest"] }
 pollster = "0.4"
+# zbus stays on async-io. Its tokio feature is crate-global and would pull a
+# second runtime into the host service and the Gamescope wallet.
+zbus = { version = "5.19", default-features = false, features = ["async-io", "blocking-api"] }
 display-info = "0.5.9"
 # Linux host (controlled side): wlroots screencopy capture, virtual input.
 # ScreenCast portal is the GNOME/KDE fallback. PipeWire itself is dlopen'd.

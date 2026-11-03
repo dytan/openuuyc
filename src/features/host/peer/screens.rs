@@ -109,6 +109,7 @@ pub(crate) struct Screens {
     deferred: Option<Deferred>,
     before_super: Option<actions::Running>,
     headless: headless::State,
+    terminal: std::sync::Arc<std::sync::Mutex<crate::features::host::terminal::Sessions>>,
 }
 pub(crate) struct Deferred {
     pub options: crate::features::stream_control::publisher::ConnectOptions,
@@ -229,6 +230,11 @@ impl Screens {
     pub(crate) fn authorization(&self) -> Lease {
         self.lease.clone()
     }
+    pub(crate) fn terminal(
+        &self,
+    ) -> std::sync::Arc<std::sync::Mutex<crate::features::host::terminal::Sessions>> {
+        std::sync::Arc::clone(&self.terminal)
+    }
     pub(super) async fn new(
         connection: Arc<RTCPeerConnection>,
         lease: Lease,
@@ -303,6 +309,7 @@ impl Screens {
             deferred,
             before_super: None,
             headless: Default::default(),
+            terminal: crate::features::host::terminal::shared(),
         };
         tracing::debug!("host connect: display inventory read");
         state.refresh()?;

@@ -40,7 +40,7 @@ impl Kind {
     }
 }
 
-fn wayland_session() -> bool {
+pub(crate) fn wayland_session() -> bool {
     std::env::var_os("WAYLAND_DISPLAY").is_some()
 }
 
@@ -293,6 +293,8 @@ pub(crate) struct Desktop {
     backend: Backend,
     scratch: Vec<u8>,
     last_hash: u64,
+    /// ScreenSaver.Inhibit for this capture. Dropped with the desktop.
+    _inhibit: Option<super::power_request::Request>,
 }
 
 impl Desktop {
@@ -320,6 +322,16 @@ impl Desktop {
                         backend = backend.label(),
                         "Linux host capture opened"
                     );
+                    let inhibit = match super::power_request::Request::capture() {
+                        Ok(request) => Some(request),
+                        Err(error) => {
+                            tracing::debug!(
+                                error = %format!("{error:#}"),
+                                "host capture idle inhibition unavailable"
+                            );
+                            None
+                        }
+                    };
                     return Ok(Self {
                         screen,
                         generation: 0,
@@ -328,6 +340,7 @@ impl Desktop {
                         backend,
                         scratch: Vec::new(),
                         last_hash: 0,
+                        _inhibit: inhibit,
                     });
                 }
                 Err(error) => {

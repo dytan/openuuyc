@@ -164,6 +164,74 @@ pub(crate) async fn receive_session(
                 request_id: h.request_id,
             });
             match request.payload {
+                Some(PbRpcRequestPayload::TerminalCheck(bytes)) => {
+                    #[derive(Clone, PartialEq, prost::Message)]
+                    struct CheckEnvReq {
+                        #[prost(uint64, tag = "1")]
+                        retry: u64,
+                    }
+                    let _ = CheckEnvReq::decode(bytes.as_slice())?;
+                    let refusal = crate::features::host::terminal::unavailable().or_else(|| {
+                        (!session.authorization().terminal_allowed()).then_some("本机未允许终端")
+                    });
+                    let allowed = refusal.is_none();
+                    let resp = CheckEnvResp::result(refusal);
+                    tracing::info!(
+                        allowed,
+                        reason = refusal.unwrap_or_default(),
+                        code = resp.code,
+                        "host terminal environment check answered"
+                    );
+                    return Ok(response(
+                        &message,
+                        header,
+                        PbRpcResponsePayload::TerminalCheckEnvRsp(resp.encode_to_vec()),
+                    ));
+                }
+                Some(PbRpcRequestPayload::TerminalRename(bytes)) => {
+                    #[derive(Clone, PartialEq, prost::Message)]
+                    struct RenameReq {
+                        #[prost(uint32, tag = "1")]
+                        session_id: u32,
+                        #[prost(string, tag = "2")]
+                        new_name: String,
+                    }
+                    let request = RenameReq::decode(bytes.as_slice())?;
+                    let lease = session.authorization();
+                    let account = lease.account().to_owned();
+                    let result = if lease.terminal_allowed() {
+                        let sessions = session.terminal();
+                        let mut sessions = sessions.lock().unwrap_or_else(|e| e.into_inner());
+                        let owner = crate::features::host::terminal::Owner::new(
+                            &account,
+                            lease.terminal_local_allowed(),
+                        );
+                        sessions
+                            .rename(owner, request.session_id, &request.new_name)
+                            .map_err(|error| error.to_string())
+                    } else {
+                        Err("本机未允许终端".to_owned())
+                    };
+                    let (code, detail) = match &result {
+                        Ok(()) => (0, String::new()),
+                        Err(error) => (1, error.clone()),
+                    };
+                    if let Err(error) = &result {
+                        tracing::warn!(%error, "host terminal rename rejected");
+                    }
+                    return Ok(response(
+                        &message,
+                        header,
+                        PbRpcResponsePayload::TerminalRenameSessionRsp(
+                            RenameSessionResp {
+                                session_id: request.session_id,
+                                code,
+                                message: detail,
+                            }
+                            .encode_to_vec(),
+                        ),
+                    ));
+                }
                 Some(PbRpcRequestPayload::MouseSwitch(bytes)) => {
                     #[derive(Clone, PartialEq, prost::Message)]
                     struct Switch {
@@ -613,4 +681,42 @@ fn configure_media(
         }
     }
     Ok(errors)
+}
+
+/// The controller requires `code == 0` and `message` exactly `"ok"`.
+#[derive(Clone, PartialEq, prost::Message)]
+struct CheckEnvResp {
+    #[prost(int32, tag = "1")]
+    code: i32,
+    #[prost(string, tag = "2")]
+    message: String,
+}
+
+impl CheckEnvResp {
+    fn result(refusal: Option<&'static str>) -> Self {
+        match refusal {
+            None => Self {
+                code: 0,
+                message: "ok".to_owned(),
+            },
+            Some(_) if crate::features::host::terminal::unavailable().is_some() => Self {
+                code: 5,
+                message: "terminal_component_unavailable".to_owned(),
+            },
+            Some(_) => Self {
+                code: 6,
+                message: "environment_check_failed".to_owned(),
+            },
+        }
+    }
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct RenameSessionResp {
+    #[prost(uint32, tag = "1")]
+    session_id: u32,
+    #[prost(int32, tag = "2")]
+    code: i32,
+    #[prost(string, tag = "3")]
+    message: String,
 }

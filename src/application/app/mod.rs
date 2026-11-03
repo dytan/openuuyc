@@ -46,6 +46,11 @@ pub struct GuiOptions {
 }
 
 pub fn run(options: GuiOptions) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    crate::platform::linux::gamescope::prepare_wallet();
+    #[cfg(target_os = "linux")]
+    std::thread::spawn(crate::platform::linux::host_service::startup::migrate);
+    crate::features::host::terminal::shared();
     let _user_backend = crate::platform::windows::host_service::user_backend::Server::start()?;
     let _migration = crate::platform::windows::components::migration::UserRecovery::start();
     let _shortcuts = crate::application::viewer_shortcuts::Watcher::new()?;

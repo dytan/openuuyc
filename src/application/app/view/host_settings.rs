@@ -62,8 +62,12 @@ impl DeviceCenterApp {
         let mut ports = host.port_mapping_allowed();
         let mut power = host.power_allowed();
         let mut wol = host.wol_allowed();
+        let terminal_refusal = crate::features::host::terminal::unavailable();
+        let terminal_supported = terminal_refusal.is_none();
+        let mut terminal = host.terminal_allowed();
+        let mut terminal_local = host.terminal_local_allowed();
         let mut clipboard = host.clipboard_settings();
-        let before = (files, ports, power, wol, clipboard);
+        let before = (files, ports, power, wol, clipboard, terminal, terminal_local);
         let enabled = usize::from(clipboard.enabled)
             + usize::from(clipboard.enabled && clipboard.files)
             + if guest {
@@ -73,8 +77,14 @@ impl DeviceCenterApp {
                     .into_iter()
                     .filter(|v| *v)
                     .count()
+                    + usize::from(terminal_supported && terminal)
+                    + usize::from(terminal_supported && terminal_local)
             };
-        let total = if guest { 2 } else { 6 };
+        let total = if guest {
+            2
+        } else {
+            6 + 2 * usize::from(terminal_supported)
+        };
         let id = egui::Id::new(("host-access-settings", self.login_generation));
         let mut open = ui.data(|data| data.get_temp::<bool>(id).unwrap_or(false));
         form_row(
@@ -115,6 +125,14 @@ impl DeviceCenterApp {
                             ui.checkbox(&mut power, "关机和重启");
                             ui.checkbox(&mut ports, "端口转发");
                             ui.checkbox(&mut wol, "局域网唤醒协助");
+                            if terminal_supported {
+                                ui.checkbox(&mut terminal, "终端");
+                                ui.add_enabled_ui(terminal, |ui| {
+                                    ui.checkbox(&mut terminal_local, "允许主控接入本机终端会话");
+                                });
+                            } else if let Some(reason) = terminal_refusal {
+                                ui.label(RichText::new(reason).small().color(MUTED));
+                            }
                         }
                     });
                 });
@@ -126,6 +144,8 @@ impl DeviceCenterApp {
             (power != before.2).then(|| host.set_power_allowed(power)),
             (wol != before.3).then(|| host.set_wol_allowed(wol)),
             (clipboard != before.4).then(|| host.set_clipboard_settings(clipboard)),
+            (terminal != before.5).then(|| host.set_terminal_allowed(terminal)),
+            (terminal_local != before.6).then(|| host.set_terminal_local_allowed(terminal_local)),
         ];
         let mut changed = false;
         for result in results.into_iter().flatten() {
@@ -185,6 +205,7 @@ impl DeviceCenterApp {
                 host.audio_devices_failed();
             }
             self.host_access_settings(ui, host);
+            self.host_startup_settings(ui);
             if !host.is_guest() {
                 self.wol_setup_entry(ui);
             }
@@ -406,5 +427,38 @@ impl DeviceCenterApp {
             );
         }
         ui.ctx().request_repaint_after(Duration::from_millis(250));
+    }
+
+    /// Login autostart. Desktops that reach `graphical-session.target` use
+    /// `app-openuuyc.service` so the portal sees the same app id as a menu
+    /// launch. Others get an XDG autostart entry.
+    fn host_startup_settings(&mut self, ui: &mut egui::Ui) {
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = ui;
+        }
+        #[cfg(target_os = "linux")]
+        {
+            use crate::platform::linux::host_service::startup;
+            if let Some(reason) = startup::unavailable() {
+                form_row(ui, "登录自启", &reason, |_| {});
+                return;
+            }
+            let mut enabled = startup::enabled().unwrap_or(false);
+            let before = enabled;
+            form_row(
+                ui,
+                "登录自启",
+                "图形会话开始后在后台打开控制中心。接入 graphical-session.target 的桌面用 systemd 用户单元，其它桌面用 XDG 自启动条目",
+                |ui| {
+                    ui.checkbox(&mut enabled, "开机后启动");
+                },
+            );
+            if enabled != before {
+                if let Err(error) = startup::configure(enabled) {
+                    self.status = StatusMessage::error(error.to_string());
+                }
+            }
+        }
     }
 }

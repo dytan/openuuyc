@@ -1,4 +1,5 @@
 //! One receive-only audio output per UU connection, shared by all its windows.
+mod output_buffer;
 pub(crate) mod dsp;
 pub(crate) mod encoder;
 pub(crate) mod neteq;
@@ -643,11 +644,14 @@ fn open_output(
     shared: Arc<Shared>,
     failed: Arc<AtomicBool>,
 ) -> Result<cpal::Stream> {
-    let config = device
+    let supported = device
         .default_output_config()
         .context("读取音频输出格式失败")?;
-    let format = config.sample_format();
-    let config = config.config();
+    let format = supported.sample_format();
+    let mut config = supported.config();
+    // PulseAudio's default target is about two seconds. Ask for ~20 ms instead.
+    config.buffer_size = output_buffer::playback_buffer(device, &supported);
+
     match format {
         cpal::SampleFormat::F32 => build_stream::<f32>(device, &config, shared, failed),
         cpal::SampleFormat::F64 => build_stream::<f64>(device, &config, shared, failed),

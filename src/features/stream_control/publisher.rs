@@ -9,6 +9,17 @@ use anyhow::Context as _;
 mod displays;
 pub(crate) use displays::{receive_session, screen_states};
 
+/// The terminal session list changed. Controllers answer by listing again;
+/// pushing the list itself is dropped.
+pub(crate) fn terminal_session_changed() -> Vec<u8> {
+    PbControlMessage {
+        seq: 0,
+        timestamp: 0,
+        payload: Some(PbPayload::TerminalSessionChanged(Vec::new())),
+    }
+    .encode_to_vec()
+}
+
 pub(crate) struct DrawRequest {
     pub command: super::annotation::wire::PbDrawRequestKind,
     sequence: i64,

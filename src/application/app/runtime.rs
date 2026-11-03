@@ -305,6 +305,15 @@ pub(super) async fn gui_worker_loop(
                         }
                     }
                 }
+                GuiCommand::Terminal { generation, device } => {
+                    if generation == catalog_generation
+                        && logout_task.is_none()
+                        && let Some(client) = &client
+                    {
+                        crate::features::terminal::relay::ensure(Arc::clone(client));
+                        crate::features::terminal::service::start(Arc::clone(client), device);
+                    }
+                }
                 GuiCommand::Diagnostics {
                     generation,
                     device,

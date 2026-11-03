@@ -28,6 +28,13 @@ struct Record {
     file_transfer: bool,
     #[serde(default)]
     port_mapping: bool,
+    /// Interactive shell for a controller. Off until the operator turns it on.
+    #[serde(default)]
+    terminal: bool,
+    /// Controllers may also see shells opened on this machine. Meaningless
+    /// while `terminal` is off.
+    #[serde(default)]
+    terminal_local: bool,
     #[serde(default)]
     remote_power: bool,
     #[serde(default)]
@@ -73,6 +80,8 @@ impl Store {
         bool,
         bool,
         bool,
+        bool,
+        bool,
     )> {
         let bytes = match self.0.get_secret() {
             Ok(bytes) => bytes,
@@ -86,6 +95,8 @@ impl Store {
                     Default::default(),
                     Default::default(),
                     true,
+                    false,
+                    false,
                     false,
                     false,
                     false,
@@ -111,6 +122,8 @@ impl Store {
             record.clipboard,
             record.file_transfer,
             record.port_mapping,
+            record.terminal,
+            record.terminal_local,
             record.remote_power,
             record.wol,
         ))
@@ -126,6 +139,8 @@ impl Store {
         clipboard: super::clipboard::Settings,
         file_transfer: bool,
         port_mapping: bool,
+        terminal: bool,
+        terminal_local: bool,
         remote_power: bool,
         wol: bool,
     ) -> Result<()> {
@@ -135,6 +150,7 @@ impl Store {
         if let Some(device) = &audio_device {
             device.validate()?;
         }
+        let terminal_local = terminal && terminal_local;
         self.0
             .set_secret(&serde_json::to_vec(&Record {
                 schema: 1,
@@ -147,6 +163,8 @@ impl Store {
                 clipboard,
                 file_transfer,
                 port_mapping,
+                terminal,
+                terminal_local,
                 remote_power,
                 wol,
             })?)
