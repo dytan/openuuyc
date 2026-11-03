@@ -18,6 +18,8 @@ mod diagnostics_panel;
 mod host_assist;
 mod host_settings;
 mod logs;
+mod terminal_control;
+mod terminal_sessions;
 mod port_mapping;
 mod power;
 mod update_dialog;
@@ -38,6 +40,7 @@ enum Page {
     Settings,
     Diagnostics,
     Shortcuts,
+    TerminalSessions,
     Logs,
     Plugins,
     About,
@@ -53,6 +56,7 @@ impl Page {
             Self::Settings => "连接设置",
             Self::Diagnostics => "本机诊断",
             Self::Shortcuts => "快捷键设置",
+            Self::TerminalSessions => "终端会话",
             Self::Logs => "日志设置",
             Self::Plugins => "插件管理",
             Self::About => "关于",
@@ -79,6 +83,8 @@ pub(super) struct CenterUi {
     host_assist_show_code: bool,
     guest_assist_open: bool,
     pub(super) shortcuts: crate::application::viewer_shortcuts::Editor,
+    /// Device id whose remote-terminal popup is open.
+    pub(super) terminal_popup_target: Option<String>,
 
     plugins: crate::plugins::Manager,
 }
@@ -138,6 +144,7 @@ enum Icon {
     Plugins,
     Keyboard,
     Diagnostics,
+    Terminal,
 }
 
 pub(super) fn configure_visuals(ctx: &egui::Context) {
@@ -149,6 +156,11 @@ fn paint_icon(p: &egui::Painter, rect: egui::Rect, icon: Icon, color: Color32) {
     let q = |x, y| c + vec2(x, y);
     let s = Stroke::new(1.5, color);
     match icon {
+        Icon::Terminal => {
+            p.line_segment([q(-8.0, -6.0), q(-8.0, 6.0)], s);
+            p.line_segment([q(-8.0, 6.0), q(8.0, 6.0)], s);
+            p.line_segment([q(-4.0, 1.0), q(2.0, 1.0)], s);
+        }
         Icon::Diagnostics => {
             p.add(egui::Shape::line(
                 vec![
@@ -632,6 +644,8 @@ impl DeviceCenterApp {
             .show(ui, |ui| {
                 if self.center_ui.page == Page::DeviceDetails {
                     self.device_details_page(ui);
+                } else if self.center_ui.page == Page::TerminalSessions {
+                    self.terminal_sessions_page(ui);
                 } else if self.center_ui.page == Page::Settings {
                     self.settings_page(ui);
                 } else if self.center_ui.page == Page::Diagnostics {
@@ -756,6 +770,18 @@ impl DeviceCenterApp {
                 ui.add_space(14.0);
                 ui.separator();
                 ui.add_space(8.0);
+                if nav_item(
+                    ui,
+                    Icon::Terminal,
+                    "终端会话",
+                    {
+                        let running = crate::features::host::terminal::running();
+                        (running > 0).then_some(running)
+                    },
+                    self.center_ui.page == Page::TerminalSessions,
+                ) {
+                    self.center_ui.page = Page::TerminalSessions;
+                }
                 if nav_item(
                     ui,
                     Icon::Settings,

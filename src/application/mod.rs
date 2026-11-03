@@ -18,6 +18,23 @@ pub fn launch_installed(
 ) -> anyhow::Result<()> {
     crate::platform::windows::components::application::start_installed(arguments)
 }
+/// Attach to a shell the local host terminal is already running.
+pub fn terminal_attach(session: Option<&str>, list: bool, new: bool) -> anyhow::Result<()> {
+    crate::features::host::terminal::local::run_client(session, list, new)
+}
+
+/// List, create, or attach to a shell on a remote device.
+pub fn terminal_controller(
+    session: Option<&str>,
+    list: bool,
+    new: bool,
+    device: Option<String>,
+    device_id: Option<String>,
+    via_gui: bool,
+) -> anyhow::Result<()> {
+    crate::features::terminal::cli::run(session, list, new, device, device_id, via_gui)
+}
+
 pub fn route_installed_gui() -> anyhow::Result<bool> {
     app::maintenance::route_gui().inspect_err(app::maintenance::report_error)
 }

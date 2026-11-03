@@ -119,26 +119,48 @@ controller.
 
 ## Required setup for input injection
 
-`uinput` needs write access to `/dev/uinput`. Pick one:
+`uinput` needs write access to `/dev/uinput`. The packaged rule is
+[`packaging/linux/60-openuuyc-uinput.rules`](packaging/linux/60-openuuyc-uinput.rules):
 
-Load the module (if `/dev/uinput` is missing):
+    KERNEL=="uinput", SUBSYSTEM=="misc", TAG+="uaccess", OPTIONS+="static_node=uinput"
 
+`uaccess` lets logind grant the active session. It does not add the user to
+the `input` group and does not need a re-login after the rule is loaded.
+`install-omarchy.sh` and the in-tree AUR stubs install this file. By hand:
+
+    sudo install -Dm644 packaging/linux/60-openuuyc-uinput.rules /usr/lib/udev/rules.d/60-openuuyc-uinput.rules
+    sudo udevadm control --reload-rules && sudo udevadm trigger
     sudo modprobe uinput
     echo uinput | sudo tee /etc/modules-load.d/uinput.conf
 
-Grant your user access with a udev rule (preferred):
-
-    echo 'KERNEL=="uinput", GROUP="input", MODE="0660", OPTIONS+="static_node=uinput"' \
-      | sudo tee /etc/udev/rules.d/99-openuuyc-uinput.rules
-    sudo usermod -aG input "$USER"
-    sudo udevadm control --reload-rules && sudo udevadm trigger
-
-Then log out and back in (group change) and confirm:
-
-    ls -l /dev/uinput          # should be group 'input', mode 0660
-    id | tr ',' '\n' | grep input
+If the node exists but the tag has not applied to this session yet, an ACL
+on `/dev/uinput` for the current user is enough until the next seat change.
 
 Screen capture and audio need no root.
+
+## Login autostart
+
+被控设置 includes **登录自启**. Desktops that reach `graphical-session.target`
+(GNOME, KDE, uwsm, niri, and Hyprland when the session is wired that way)
+enable `app-openuuyc.service`. The `app-` prefix is the desktop-entry id, so
+xdg-desktop-portal treats the process like a menu launch and can keep a
+screen-share grant. `openuuyc.service` only forwards to that unit. On the
+first start, an older enabled `openuuyc.service` is migrated.
+
+XFCE, MATE, and Cinnamon do not reach that target. The same switch writes
+`~/.config/autostart/openuuyc.desktop` instead. A portable run with no
+packaged unit writes `~/.config/systemd/user/app-openuuyc.service` from the
+current executable.
+
+## Terminal
+
+Host settings **终端** allows a controller to open a shell (`kind = 8`,
+`TERM` frames on `BINARY_DATA_CHANNEL`). It is off until turned on. A second
+switch, **允许主控接入本机终端会话**, lets a controller see shells opened on
+this machine; it is off by default and turns off with the first switch.
+Running as root is refused. The sidebar page **终端会话** lists shells and
+can attach one in a local terminal emulator. From a shell:
+`OpenUUYC terminal` (local) or `OpenUUYC terminal --device-id <id>` (remote).
 
 ## Self-test (no peer required)
 

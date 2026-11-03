@@ -136,6 +136,7 @@ impl Peer {
         clipboard_level: i32,
         file_capabilities: crate::features::file_transfer::host::Capabilities,
         data_only: bool,
+        terminal: bool,
         update_resume: Option<super::update_resume::Context>,
     ) -> Result<Self> {
         let audio_only = deferred.is_some() && !data_only;
@@ -723,6 +724,16 @@ impl Peer {
                 if let Some(previous) = lock(&diagnostics_binding).replace(token) {
                     previous.cancel();
                 }
+                return Box::pin(async {});
+            }
+            // Terminal frames share BINARY_DATA_CHANNEL with diagnostics. A
+            // terminal connection does not ask for the diagnostics extension.
+            if terminal && !diagnostics_extension && channel.label() == "BINARY_DATA_CHANNEL" {
+                crate::features::host::terminal::bind(
+                    &channel,
+                    channel_screens.clone(),
+                    channel_cancel.clone(),
+                );
                 return Box::pin(async {});
             }
             let screens = channel_screens.clone();

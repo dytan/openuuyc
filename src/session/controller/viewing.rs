@@ -287,6 +287,20 @@ pub(super) async fn run_viewer_connection_owner(
                 tracing::warn!(%error, "connected assistance code was not saved");
                 reporter(ConnectionProgress::ready(format!("已连接 · 验证码未保存：{error}")));
             }
+            // Keep the local session from blanking or sleeping for the life of
+            // this viewing attachment. Capture on a Linux host still wakes a
+            // DPMS-blanked panel on its own.
+            #[cfg(target_os = "linux")]
+            let _power_request = match crate::platform::power_request::Request::viewing() {
+                Ok(request) => Some(request),
+                Err(error) => {
+                    tracing::warn!(
+                        error = %format!("{error:#}"),
+                        "viewer display-idle inhibition unavailable"
+                    );
+                    None
+                }
+            };
             let upgrade = session_control.remote_upgrade();
             let upgrade_deadline = async {
                 if let Some(upgrade) = &upgrade {

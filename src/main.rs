@@ -101,6 +101,26 @@ enum Commands {
 
     #[command(hide = true)]
     PluginHost { manifest: PathBuf },
+    /// List or attach to a host terminal session, or a shell on a remote device.
+    Terminal {
+        /// Local session name or id. A remote session uses the id from `--list`.
+        session: Option<String>,
+        /// List sessions and exit.
+        #[arg(long)]
+        list: bool,
+        /// Open a new session and attach. The positional argument is its name.
+        #[arg(long)]
+        new: bool,
+        /// Remote device name. Must match exactly one device.
+        #[arg(long, conflicts_with = "device_id")]
+        device: Option<String>,
+        /// Remote device id.
+        #[arg(long)]
+        device_id: Option<String>,
+        /// Use the running control center instead of opening another session.
+        #[arg(long, hide = true)]
+        via_gui: bool,
+    },
     /// Linux 被控自检：采集→编码→解码→uinput（无需对端）
     #[cfg(target_os = "linux")]
     #[command(hide = true)]
@@ -298,6 +318,27 @@ fn main() -> Result<()> {
             openuuyc::application::capture_agent(&pipe, parent)
         }
         Commands::DisplayRecovery { token } => openuuyc::application::display_recovery(&token),
+        Commands::Terminal {
+            session,
+            list,
+            new,
+            device,
+            device_id,
+            via_gui,
+        } => {
+            if device.is_some() || device_id.is_some() {
+                openuuyc::application::terminal_controller(
+                    session.as_deref(),
+                    list,
+                    new,
+                    device,
+                    device_id,
+                    via_gui,
+                )
+            } else {
+                openuuyc::application::terminal_attach(session.as_deref(), list, new)
+            }
+        }
         Commands::PluginVideoHost => openuuyc::plugins::video::host(),
         Commands::Notification { .. } => {
             unreachable!("notification activation is handled before application startup")

@@ -15,6 +15,9 @@ use winit::platform::windows::EventLoopBuilderExtWindows;
 use winit::window::{Window, WindowId};
 
 pub(super) fn run(config: WindowConfig, factory: AppFactory) -> Result<()> {
+    if let Err(error) = super::shutdown::install() {
+        tracing::debug!(error = %format!("{error:#}"), "exit signal handler was not installed");
+    }
     #[cfg_attr(not(windows), allow(unused_mut))]
     let mut builder = EventLoop::<Event>::with_user_event();
     // The Windows keyboard hook needs to see raw messages before winit does.
@@ -128,6 +131,10 @@ impl Runner {
         super::branding::set_taskbar_icon(&window);
         if self.root {
             crate::application::app::instance::register_window(&window)?;
+            #[cfg(target_os = "linux")]
+            if !self.config.notification {
+                crate::platform::linux::gamescope::fit_control_center(&window);
+            }
         }
         if self.config.centered
             && let Some(monitor) = window.current_monitor()

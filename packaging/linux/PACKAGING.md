@@ -90,6 +90,22 @@ cd packaging/arch && ./sync-pkgver.sh && makepkg -f
 Outputs land under `dist/` (gitignored), except Arch packages which land in
 `packaging/arch/` by makepkg default.
 
+## Host files (udev, autostart, Omarchy)
+
+`install.sh` still installs the controller binary, desktop entry, and icons.
+Host packaging lives beside it:
+
+| File | Role |
+|------|------|
+| `60-openuuyc-uinput.rules` | `uaccess` on `/dev/uinput` for the active session |
+| `app-openuuyc.service` | Login unit whose name matches the desktop id, so the portal keeps screen-share grants |
+| `openuuyc.service` | Forwards to `app-openuuyc.service` for older enables |
+| `../aur/` | In-tree AUR stubs for `dytan/openuuyc` `linux/host`. Not published |
+| `../../install-omarchy.sh` | Arch install of the binary, udev rule, units, and an Omarchy menu row when `~/.config/omarchy` exists |
+
+The settings switch writes a user unit or an XDG autostart entry when those
+packaged files are not installed. See [`LINUX-HOST.md`](../../LINUX-HOST.md).
+
 ## CI
 
 `linux-release.yml` on Ubuntu 22.04 builds and uploads:

@@ -23,6 +23,7 @@ pub(crate) mod loopback;
 pub(crate) mod nvenc;
 pub(crate) mod preprocess;
 pub(crate) mod system_power;
+pub(crate) mod terminal;
 pub(crate) mod wol;
 pub(crate) mod qsv;
 pub(crate) mod qsv_allocator;

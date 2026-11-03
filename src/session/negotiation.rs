@@ -36,6 +36,8 @@ pub(crate) enum ControlPurpose {
     Audio,
     PortMapping,
     FileTransfer,
+    /// `CT_TERMINAL`, connection kind 8. A shell, with no video of its own.
+    Terminal,
 }
 
 pub(crate) fn build_control_frames(
@@ -86,7 +88,7 @@ fn build_control_frames_with_id(
         "openuuyc_audio_only": purpose == ControlPurpose::Audio,
         "openuuyc_audio_control": 1,
         "openuuyc_annotation": 1,
-        "openuuyc_diagnostics": 1,
+        "openuuyc_diagnostics": if purpose == ControlPurpose::Terminal { 0 } else { 1 },
         "openuuyc_drag_drop": 1,
         "device_capability": decoder_support
     }))?;
@@ -191,6 +193,7 @@ fn encode_connect_options(
             ControlPurpose::Viewing | ControlPurpose::Audio => 1,
             ControlPurpose::PortMapping => 9,
             ControlPurpose::FileTransfer => 5,
+            ControlPurpose::Terminal => 8,
         },
     );
     push_signed_int32_field(&mut options, 2, -1);

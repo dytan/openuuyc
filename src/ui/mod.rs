@@ -13,6 +13,9 @@ mod windows;
 
 // Linux: winit event loop + wgpu presenter (Vulkan/GL) instead of D3D11.
 #[cfg(not(windows))]
+#[path = "shutdown_linux.rs"]
+mod shutdown;
+#[cfg(not(windows))]
 pub(crate) mod gfx;
 #[cfg(not(windows))]
 mod shell;

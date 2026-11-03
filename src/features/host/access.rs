@@ -62,6 +62,12 @@ pub(crate) struct ConnectionInfo {
     pub client_id: String,
     pub elapsed_seconds: Option<u64>,
     pub observation_lost: bool,
+    /// A terminal connection (`kind = 8`): a shell, not a watched screen.
+    #[serde(default)]
+    pub terminal: bool,
+    /// That shell was opened on this machine and the controller attached to it.
+    #[serde(default)]
+    pub local_terminal: bool,
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -124,6 +130,8 @@ struct Ownership {
     clipboard: super::clipboard::Settings,
     file_transfer: bool,
     port_mapping: bool,
+    terminal: bool,
+    terminal_local: bool,
     remote_power: bool,
     wol: bool,
     power_executing: bool,
@@ -178,6 +186,8 @@ impl Default for Handle {
                 clipboard: Default::default(),
                 file_transfer: true,
                 port_mapping: false,
+                terminal: false,
+                terminal_local: false,
                 remote_power: false,
                 wol: false,
                 power_executing: false,
@@ -470,6 +480,8 @@ impl Handle {
                 clipboard,
                 file_transfer,
                 port_mapping,
+                terminal,
+                terminal_local,
                 remote_power,
                 wol,
             )) => {
@@ -487,6 +499,8 @@ impl Handle {
                 state.clipboard = clipboard;
                 state.file_transfer = file_transfer;
                 state.port_mapping = port_mapping;
+                state.terminal = terminal;
+                state.terminal_local = terminal && terminal_local;
                 state.remote_power = remote_power;
                 state.wol = wol;
                 state.dirty = false;
@@ -622,6 +636,48 @@ impl Handle {
     }
     pub(crate) fn port_mapping_allowed(&self) -> bool {
         lock(&self.ownership).port_mapping
+    }
+    /// Whether a controller may open a shell on this machine. Off by default.
+    pub(crate) fn terminal_allowed(&self) -> bool {
+        lock(&self.ownership).terminal
+    }
+    pub(crate) fn set_terminal_allowed(&self, allowed: bool) -> anyhow::Result<()> {
+        {
+            let mut state = lock(&self.ownership);
+            anyhow::ensure!(state.active, "账号会话已结束");
+            if state.terminal != allowed {
+                state.terminal = allowed;
+                if !allowed {
+                    state.terminal_local = false;
+                }
+                state.settings_revision = state.settings_revision.wrapping_add(1);
+                state.dirty = true;
+                state.status.saving = true;
+                state.status.settings_error = None;
+            }
+        }
+        if !allowed {
+            super::terminal::end_login(&self.account);
+        }
+        Ok(())
+    }
+    /// Whether a controller may also attach to shells opened on this machine.
+    pub(crate) fn terminal_local_allowed(&self) -> bool {
+        let state = lock(&self.ownership);
+        state.terminal && state.terminal_local
+    }
+    pub(crate) fn set_terminal_local_allowed(&self, allowed: bool) -> anyhow::Result<()> {
+        let mut state = lock(&self.ownership);
+        anyhow::ensure!(state.active, "账号会话已结束");
+        let allowed = allowed && state.terminal;
+        if state.terminal_local != allowed {
+            state.terminal_local = allowed;
+            state.settings_revision = state.settings_revision.wrapping_add(1);
+            state.dirty = true;
+            state.status.saving = true;
+            state.status.settings_error = None;
+        }
+        Ok(())
     }
     pub(crate) fn set_port_mapping_allowed(&self, allowed: bool) -> anyhow::Result<()> {
         let mut state = lock(&self.ownership);
@@ -783,6 +839,7 @@ impl Handle {
     }
     pub(crate) fn set_allowed(&self, allowed: bool) {
         if !allowed {
+            super::terminal::end_login(&self.account);
             self.power.invalidate();
             if !crate::platform::windows::host_service::resident::managed() {
                 if let Err(error) = super::update_resume::clear(&self.scope) {
@@ -840,6 +897,8 @@ impl Handle {
                 clipboard,
                 file_transfer,
                 port_mapping,
+                terminal,
+                terminal_local,
                 remote_power,
                 wol,
             ) = {
@@ -858,6 +917,8 @@ impl Handle {
                     state.clipboard,
                     state.file_transfer,
                     state.port_mapping,
+                    state.terminal,
+                    state.terminal_local,
                     state.remote_power,
                     state.wol,
                 )
@@ -875,6 +936,8 @@ impl Handle {
                         clipboard,
                         file_transfer,
                         port_mapping,
+                        terminal,
+                        terminal_local,
                         remote_power,
                         wol,
                     },
@@ -893,6 +956,8 @@ impl Handle {
                         clipboard,
                         file_transfer,
                         port_mapping,
+                        terminal,
+                        terminal_local,
                         remote_power,
                         wol,
                     )
@@ -945,6 +1010,7 @@ impl Handle {
         state.status.message = "本机离线".into();
         self.desired.send_replace(None);
         drop(state);
+        super::terminal::end_login(&self.account);
         if clear_update {
             if let Err(error) = super::update_resume::clear(&self.scope) {
                 tracing::warn!(%error, "retired update media handoff cleanup failed");
@@ -975,7 +1041,11 @@ impl Handle {
     }
     pub(crate) fn disconnect_session(&self, session: &str) -> bool {
         let managed = crate::platform::windows::host_service::resident::managed();
-        disconnect_session(&mut lock(&self.ownership), session, managed)
+        let disconnected = disconnect_session(&mut lock(&self.ownership), session, managed);
+        if disconnected {
+            super::terminal::end_login(&self.account);
+        }
+        disconnected
     }
     pub(crate) fn requested(&self) -> bool {
         let state = lock(&self.ownership);
@@ -1049,7 +1119,7 @@ impl Drop for SessionLease {
     }
 }
 impl Lease {
-    pub(crate) fn controller(&self, device_id: &str, client_id: &str) {
+    pub(crate) fn controller(&self, device_id: &str, client_id: &str, terminal: bool) {
         self.modify(|state| {
             let session_id = state
                 .status
@@ -1065,8 +1135,31 @@ impl Lease {
                     String::new()
                 },
                 client_id: client_id.to_owned(),
+                terminal,
                 ..Default::default()
             });
+        });
+    }
+    pub(crate) fn account(&self) -> &str {
+        &self.handle.account
+    }
+    pub(crate) fn terminal_allowed(&self) -> bool {
+        let state = lock(&self.handle.ownership);
+        self.current(&state) && self.assistance.is_none() && !self.handle.guest && state.terminal
+    }
+    pub(crate) fn terminal_local_allowed(&self) -> bool {
+        let state = lock(&self.handle.ownership);
+        self.current(&state)
+            && self.assistance.is_none()
+            && !self.handle.guest
+            && state.terminal
+            && state.terminal_local
+    }
+    pub(crate) fn terminal_on_local(&self, attached: bool) {
+        self.modify(|state| {
+            if let Some(connection) = state.status.connection.as_mut() {
+                connection.local_terminal = attached;
+            }
         });
     }
     pub(crate) fn for_assistance(&self) -> anyhow::Result<Self> {

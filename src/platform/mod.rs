@@ -17,4 +17,21 @@ pub(crate) mod linux;
 #[cfg(target_os = "linux")]
 pub(crate) use linux as windows;
 #[cfg(target_os = "linux")]
-pub(crate) use linux::{capture, decoder, display, display_hdr, encoder, surface, transfer};
+pub(crate) use linux::{
+    capture, decoder, display, display_hdr, encoder, power_request, surface, terminal, transfer,
+};
+#[cfg(windows)]
+pub(crate) use windows::terminal;
+/// The pty implementation is shared by Linux and macOS. Only Linux is built here.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub(crate) mod posix;
+
+/// Foreground command of a host terminal, when the platform can see it.
+///
+/// The name is the process in the foreground group, not the shell that started
+/// it. A pipeline reports the last process, matching `ps` `tpgid`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Foreground {
+    pub name: String,
+    pub command: String,
+}

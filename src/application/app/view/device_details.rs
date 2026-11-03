@@ -390,6 +390,7 @@ impl DeviceCenterApp {
         let mut refresh = false;
         let mut ports = false;
         let mut files = false;
+        let mut terminal_open = false;
         let mut diagnostics = false;
         let controller_id = self
             .devices
@@ -679,7 +680,12 @@ impl DeviceCenterApp {
                 crate::account::power::PowerAction::Reboot,
             ];
             let power_count = if has_power { power_actions.len() } else { 0 };
-            let action_count = power_count + 2 * usize::from(has_ports) + usize::from(viewing);
+            let has_terminal =
+                device.is_connected() && device.controllable && device.controlled_support;
+            let action_count = power_count
+                + 2 * usize::from(has_ports)
+                + usize::from(has_terminal)
+                + usize::from(viewing);
             let gap = 16.0;
             let button_w = (card.width() - action_count.saturating_sub(1) as f32 * gap)
                 / action_count.max(1) as f32;
@@ -772,10 +778,37 @@ impl DeviceCenterApp {
                 .on_disabled_hover_text("设备需要在线且允许连接")
                 .clicked();
             }
-            if viewing {
+            if has_terminal {
                 let rect = egui::Rect::from_min_size(
                     at(
                         pad + (power_count + 2 * usize::from(has_ports)) as f32 * (button_w + gap),
+                        power_y,
+                    ),
+                    vec2(button_w, theme::CONTROL_HEIGHT),
+                );
+                let mut button_ui = ui.new_child(egui::UiBuilder::new().max_rect(rect));
+                let open = self.center_ui.terminal_popup_target.as_deref() == Some(id.as_str());
+                terminal_open = detail_button(
+                    &mut button_ui,
+                    "终端",
+                    Glyph::System,
+                    !self.logout_pending,
+                    rect.size(),
+                    if open {
+                        ButtonTone::Primary
+                    } else {
+                        ButtonTone::Normal
+                    },
+                )
+                .clicked();
+            }
+            if viewing {
+                let rect = egui::Rect::from_min_size(
+                    at(
+                        pad + (power_count
+                            + 2 * usize::from(has_ports)
+                            + usize::from(has_terminal)) as f32
+                            * (button_w + gap),
                         power_y,
                     ),
                     vec2(button_w, theme::CONTROL_HEIGHT),
@@ -977,6 +1010,13 @@ impl DeviceCenterApp {
         }
         if files {
             self.open_file_transfer(id.clone());
+        }
+        if terminal_open {
+            self.start_terminal_service(device.clone());
+            self.center_ui.terminal_popup_target = Some(id.clone());
+        }
+        if self.center_ui.terminal_popup_target.as_deref() == Some(id.as_str()) {
+            self.terminal_popup(ui.ctx(), &controller_id, &id);
         }
         if connect || audio_only {
             self.selected_device_id = Some(id);

@@ -10,5 +10,6 @@ pub(crate) mod port_mapping;
 pub(crate) mod remote_cursor;
 pub(crate) mod remote_input;
 pub(crate) mod remote_upgrade;
+pub(crate) mod terminal;
 pub mod stream_control;
 pub(crate) mod viewing_settings;

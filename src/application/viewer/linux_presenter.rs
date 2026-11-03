@@ -371,6 +371,11 @@ impl ConnectingWindowsRunner {
     }
 
     fn render(&mut self) -> Result<()> {
+        if let (Some(window), Some(shell)) = (self.window.clone(), self.shell.as_ref())
+            && let Stage::Playing(player) = &mut self.stage
+        {
+            player.hold_local_shortcuts(&shell.context, &window);
+        }
         let (Some(window), Some(shell)) = (self.window.clone(), self.shell.as_mut()) else {
             return Ok(());
         };
@@ -691,6 +696,8 @@ struct Player {
     stream_control_ui: StreamControlUi,
     performance_mode: PerformancePanelMode,
     intercept_shortcuts: bool,
+    /// Wayland shortcut inhibitor or X11 keyboard grab for this window.
+    shortcuts: Option<super::linux_shortcuts::Shortcuts>,
     current: Option<DecodedVideoFrame>,
     video_size: Option<(u32, u32, u16)>,
     /// Content area of the last frame, used to map pointer positions.
@@ -774,6 +781,7 @@ impl Player {
             stream_control_ui: StreamControlUi::default(),
             performance_mode,
             intercept_shortcuts: true,
+            shortcuts: super::linux_shortcuts::Shortcuts::new(&window),
             current: None,
             video_size: None,
             video_rect: None,
@@ -793,6 +801,25 @@ impl Player {
             diagnostics_at: [None; 4],
             hidden_since: None,
         })
+    }
+
+    fn hold_local_shortcuts(&mut self, context: &egui::Context, window: &Window) {
+        let minimized = window.is_minimized().unwrap_or(false);
+        let controlling = !self.input_blocked && self.input().mode() != MouseMode::View;
+        let gate = super::input_gate::InputGate {
+            focused: self.focused,
+            minimized,
+            controlling,
+            dragging: !self.pending_drop.is_empty(),
+            menu_open: self.stream_control_ui.open || self.display_transition_visible,
+            has_video: self.current.is_some(),
+        };
+        let intercept =
+            super::input_gate::intercepts_shortcuts(self.input(), self.intercept_shortcuts);
+        let Some(shortcuts) = self.shortcuts.as_mut() else {
+            return;
+        };
+        shortcuts.update(gate, context, intercept);
     }
 
     fn control(&self) -> &crate::features::stream_control::StreamControlHandle {

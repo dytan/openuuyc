@@ -14,6 +14,8 @@ static STARTED: AtomicBool = AtomicBool::new(false);
 
 /// Called before argument parsing, logging or application worker creation.
 pub fn initialize() -> Result<()> {
+    #[cfg(target_os = "linux")]
+    crate::platform::linux::gamescope::initialize_environment();
     *READY.lock().unwrap_or_else(|e| e.into_inner()) = Ready::from_environment()?;
     if let Some(runtime) = Runtime::enter()? {
         let _ = RUNTIME.set(runtime);

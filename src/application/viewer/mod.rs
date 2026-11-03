@@ -29,6 +29,12 @@ mod display_transition;
 mod polling_warning;
 #[cfg(not(windows))]
 mod touch;
+#[cfg(target_os = "linux")]
+mod input_gate;
+#[cfg(target_os = "linux")]
+mod linux_keyboard_grab;
+#[cfg(target_os = "linux")]
+mod linux_shortcuts;
 
 #[cfg(windows)]
 mod windows_cursor;

@@ -363,7 +363,7 @@ pub(super) struct PbRpcResponse {
     pub(super) response_header: Option<PbResponseHeader>,
     #[prost(
         oneof = "PbRpcResponsePayload",
-        tags = "2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23"
+        tags = "2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 26"
     )]
     pub(super) payload: Option<PbRpcResponsePayload>,
 }
@@ -414,6 +414,12 @@ pub(super) enum PbRpcResponsePayload {
     EnterSuperScreenRep(Vec<u8>),
     #[prost(message, tag = "23")]
     DrawResp(annotation::PbDrawResponse),
+    /// Terminal environment check. Tag 25 is unused in the shipped descriptor.
+    /// `message` must be the literal `ok` when the host allows a shell.
+    #[prost(bytes, tag = "24")]
+    TerminalCheckEnvRsp(Vec<u8>),
+    #[prost(bytes, tag = "26")]
+    TerminalRenameSessionRsp(Vec<u8>),
 }
 
 #[derive(Clone, PartialEq, prost::Message)]
